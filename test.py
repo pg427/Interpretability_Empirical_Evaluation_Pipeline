@@ -87,19 +87,21 @@ def train_cli(args):
                 elif model_name == "proto":
                     fold_models[ds][model_name] = PROTOPNET_5FOLD(folds_stand)
                     save_model(fold_models[ds][model_name], model_path)
-                    file_path_json = ds_dir / f"{model_name}_fold_model.json"
-                    save_json(file_path_json, fold_models[ds][model_name])
 
-            # fold_models_explanations_measures[ds][model_name]["shap"] = {}
-            # fold_models_explanations_measures[ds][model_name]["shap"]["identity"] = identity_measure(ds, model_name, fold_models_explanations[ds][model_name]) #IDENTITY
-            # fold_models_explanations_measures[ds][model_name]["shap"]["separability"] = separability_measure(ds, model_name, fold_models_explanations[ds][model_name]) # SEPARABILITY
-            # fold_models_explanations_measures[ds][model_name]["shap"]["similarity"] = similarity_measure(ds,model_name,fold_models_explanations[ds][model_name])  # SIMILARITY
-            # fold_models_explanations_measures[ds][model_name]["shap"]["stability"] = stability_measure(ds, model_name, fold_models_explanations[ds][model_name]) # STABILITY
+            file_path_json = ds_dir / f"{model_name}_fold_model.json"
+            save_json(file_path_json, fold_models[ds][model_name])
+
+            if model_name in ["dt", "xgb", "cbr"]:
+                fold_models_explanations_measures[ds][model_name]["shap"] = {}
+                fold_models_explanations_measures[ds][model_name]["shap"]["identity"] = identity_measure(ds, model_name, fold_models_explanations[ds][model_name]) #IDENTITY
+                fold_models_explanations_measures[ds][model_name]["shap"]["separability"] = separability_measure(ds, model_name, fold_models_explanations[ds][model_name]) # SEPARABILITY
+                fold_models_explanations_measures[ds][model_name]["shap"]["similarity"] = similarity_measure(ds,model_name,fold_models_explanations[ds][model_name])  # SIMILARITY
+                fold_models_explanations_measures[ds][model_name]["shap"]["stability"] = stability_measure(ds, model_name, fold_models_explanations[ds][model_name]) # STABILITY
 
 
 
-            # file_path_json = ds_dir / f"{model_name}_fold_model_posthoc_measures.json"
-            # save_json(file_path_json, fold_models_explanations_measures[ds][model_name])
+                file_path_json = ds_dir / f"{model_name}_fold_model_posthoc_measures.json"
+                save_json(file_path_json, fold_models_explanations_measures[ds][model_name])
 
 
     # print(fold_models_explanations["iris"]['dt'][0]['feature_attribution_pred_class'][0])

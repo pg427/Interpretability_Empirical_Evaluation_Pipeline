@@ -419,28 +419,45 @@ class TabularProtoPNet(nn.Module):
         proto_class = []
         for c in range(n_classes):
             proto_class += [c] * n_prototypes_per_class
-        self.prototypes_class_identity = torch.tensor(proto_class)
+        self.register_buffer("prototypes_class_identity", torch.tensor(proto_class, dtype=torch.long))
 
         self.prototypes = nn.Parameter(
             torch.randn(self.n_prototypes, input_dim)
         )
 
-        self.classifier = nn.Linear(
-            self.n_prototypes,
-            n_classes,
-            bias=False
-        )
+        self.tau = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, X):
         z = self.encoder(X) # Encode input
         dists = torch.cdist(z, self.prototypes, p=2) ** 2 # Distance to prototypes (latent space)
-        sim = torch.exp(-dists) # Similarity (higher = closer)
+        tau = self.tau.abs() + 1e-6
+        sim = torch.exp(-dists/tau) # Similarity (higher = closer)
 
-        logits = self.classifier(sim) # Class logits
+        # logits built from class-wise max similarity (nearest prototype of each class)
+        logits = []
+        for c in range(self.n_classes):
+            mask = (self.prototypes_class_identity == c).to(sim.device)  # [P]
+            logits.append(sim[:, mask].max(dim=1).values)  # [B]
+        logits = torch.stack(logits, dim=1)  # [B, C]
         return logits, sim, dists
 
-def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, device=None, average="macro", batch_size = 256, use_amp=True, num_workers=0):
+# @torch.no_grad()
+# def project_prototypes_to_train(model: TabularProtoPNet, X_train_t: torch.Tensor, device: str, use_amp: bool):
+#     """
+#     ProtoPNet-style "projection": snap each prototype onto its nearest encoded training point.
+#     This stabilizes training and makes prototypes represent real training embeddings.
+#     """
+#     model.eval()
+#     X_train_t = X_train_t.to(device)
+#     with torch.amp.autocast("cuda", enabled=use_amp):
+#         z_train = model.encoder(X_train_t)                    # [N, D]
+#         # distances prototypes -> training embeddings
+#         d = torch.cdist(model.prototypes, z_train, p=2) ** 2  # [P, N]
+#         nn_idx = d.argmin(dim=1)                              # [P]
+#         model.prototypes.copy_(z_train[nn_idx])
 
+
+def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, device=None, average="macro", batch_size = 32, use_amp=True, num_workers=0,weight_decay=1e-4, project_every=5, tau=1.0):
     torch.set_float32_matmul_precision("high")  # PyTorch 2.x
     torch.backends.cudnn.benchmark = True
     if device is None:
@@ -455,6 +472,7 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
         # -------------------------
         # Load fold data
         # -------------------------
+
         X_train = torch.tensor(fold["X_train"], dtype=torch.float32)
         y_train = torch.tensor(fold["y_train"], dtype=torch.long)
 
@@ -465,7 +483,7 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
         train_ds = TensorDataset(X_train, y_train)
         train_loader = DataLoader(
             train_ds,
-            batch_size=batch_size,
+            batch_size=min(batch_size, len(train_ds)),
             shuffle=True,
             pin_memory=device.startswith("cuda"),
             num_workers=num_workers,
@@ -485,15 +503,15 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
 
         model.prototypes_class_identity = model.prototypes_class_identity.to(device)
 
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         criterion = nn.CrossEntropyLoss()
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        scaler_amp = torch.cuda.amp.GradScaler(enabled=use_amp)
 
         # -------------------------
         # Train
         # -------------------------
         model.train()
-        for _ in range(epochs):
+        for epoch in range(1, epochs+1):
             for xb, yb in train_loader:
                 xb = xb.to(device, non_blocking=True)
                 yb = yb.to(device, non_blocking=True)
@@ -504,9 +522,13 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
                     logits, _, _ = model(xb)
                     loss = criterion(logits, yb)
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                scaler_amp.scale(loss).backward()
+                scaler_amp.step(optimizer)
+                scaler_amp.update()
+
+            # if project_every and (epoch%project_every == 0):
+            #     project_prototypes_to_train(model, X_train, device, use_amp)
+            #     model.train()
 
         # -------------------------
         # Evaluate
@@ -515,20 +537,25 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
         with torch.no_grad():
             with torch.amp.autocast('cuda', enabled=use_amp):
                 logits, sim, dists = model(X_test)
-            y_pred = torch.argmax(logits, dim=1)
+            y_pred_logits = torch.argmax(logits, dim=1)
 
+            # nearest_proto = dists.argmin(dim=1)
+            # y_pred_nearest = model.prototypes_class_identity[nearest_proto]
             z_test = model.encoder(X_test)
 
         y_true_np = y_test.detach().cpu().numpy()
-        y_pred_np = y_pred.detach().cpu().numpy()
+        y_pred_logits_np = y_pred_logits.detach().cpu().numpy()
+        # y_pred_nearest_np = y_pred_nearest.detach().cpu().numpy()
 
-        acc = accuracy_score(y_true_np, y_pred_np)
-        prec, rec, f1, _ = precision_recall_fscore_support(
-            y_true_np,
-            y_pred_np,
-            average=average,
-            zero_division=0,
+        acc_logits = accuracy_score(y_true_np, y_pred_logits_np)
+        prec_l, rec_l, f1_l, _ = precision_recall_fscore_support(
+            y_true_np, y_pred_logits_np, average=average, zero_division=0
         )
+
+        # acc_nearest = accuracy_score(y_true_np, y_pred_nearest_np)
+        # prec_n, rec_n, f1_n, _ = precision_recall_fscore_support(
+        #     y_true_np, y_pred_nearest_np, average=average, zero_division=0
+        # )
 
         # -------------------------
         # Store fold results
@@ -543,10 +570,15 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
             "y_test": fold['y_test'],
             "model": model,
             "performance_metrics":{
-                "accuracy": float(acc),
-                "precision": float(prec),
-                "recall": float(rec),
-                "f1": float(f1),
+                "accuracy_logits": float(acc_logits),
+                "precision_logits": float(prec_l),
+                "recall_logits": float(rec_l),
+                "f1_logits": float(f1_l),
+
+                # "accuracy_nearest_proto": float(acc_nearest),
+                # "precision_nearest_proto": float(prec_n),
+                # "recall_nearest_proto": float(rec_n),
+                # "f1_nearest_proto": float(f1_n),
             },
             "proto_outputs": {
                 "similarity": sim.detach().cpu().numpy(), # How similar each test instance is to each prototype
