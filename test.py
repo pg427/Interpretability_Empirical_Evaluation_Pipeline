@@ -1,13 +1,14 @@
 from dataset_functions import load_dataset, stratified_5fold_standardize
-from method_functions import CART_DT_5FOLD, XGB_5FOLD, CBR_5FOLD, PROTOPNET_5FOLD
+from method_functions import CART_DT_5FOLD, XGB_5FOLD, CBR_5FOLD, PROTOPNET_5FOLD, MLP_5FOLD, DNN_8HL_5fold
 from posthoc_functions import CART_DT_5fold_shap, XGB_5fold_shap, CBR_5fold_shap
 from posthoc_measures_functions import identity_measure, separability_measure, similarity_measure, stability_measure
 from model_save_functions import save_model, load_model, save_json
 from pathlib import Path
 import argparse
+from direct_measures_functions import ria_measure, soc_all_methods_for_dataset
 
 ALL_DATASETS = ["iris", "wine", "breast_cancer"]
-ALL_MODELS = ["dt", "xgb", "cbr", "proto"]
+ALL_MODELS = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train AI methods on selected Datasets")
@@ -15,7 +16,7 @@ def parse_args():
                          default=["iris"],
                          help="Datasets to train on"
                          )
-    parser.add_argument("--models", nargs="+", choices=["dt", "xgb", "cbr", "proto", "all"],
+    parser.add_argument("--models", nargs="+", choices=["dt", "xgb", "cbr", "proto", "mlp", "dnn", "all"],
                         default=["dt"],
                         help="Models to train on"
                         )
@@ -47,6 +48,16 @@ def train_cli(args):
     for ds in datasets:
         print(f"\n=== DATASET {ds.upper()} ===")
         X, y, feature_names = load_dataset(ds)
+
+        # --- MEASURE 1: RIA ----
+        ria_results = ria_measure((X, y, feature_names), ds)
+        ria_json_path = (base_dir / ds) / f"{ds}_ria.json"
+        save_json(ria_json_path, ria_results)
+
+
+
+
+
         folds_stand = stratified_5fold_standardize(X, y)
         folds_unstand = stratified_5fold_standardize(X, y, standardize=False)
 
@@ -87,22 +98,26 @@ def train_cli(args):
                 elif model_name == "proto":
                     fold_models[ds][model_name] = PROTOPNET_5FOLD(folds_stand)
                     save_model(fold_models[ds][model_name], model_path)
+                elif model_name == "mlp":
+                    fold_models[ds][model_name] = MLP_5FOLD(folds_stand)
+                    save_model(fold_models[ds][model_name], model_path)
+                elif model_name == "dnn":
+                    fold_models[ds][model_name] = DNN_8HL_5fold(folds_stand)
+                    save_model(fold_models[ds][model_name], model_path)
+
 
             file_path_json = ds_dir / f"{model_name}_fold_model.json"
             save_json(file_path_json, fold_models[ds][model_name])
 
-            if model_name in ["dt", "xgb", "cbr"]:
-                fold_models_explanations_measures[ds][model_name]["shap"] = {}
-                fold_models_explanations_measures[ds][model_name]["shap"]["identity"] = identity_measure(ds, model_name, fold_models_explanations[ds][model_name]) #IDENTITY
-                fold_models_explanations_measures[ds][model_name]["shap"]["separability"] = separability_measure(ds, model_name, fold_models_explanations[ds][model_name]) # SEPARABILITY
-                fold_models_explanations_measures[ds][model_name]["shap"]["similarity"] = similarity_measure(ds,model_name,fold_models_explanations[ds][model_name])  # SIMILARITY
-                fold_models_explanations_measures[ds][model_name]["shap"]["stability"] = stability_measure(ds, model_name, fold_models_explanations[ds][model_name]) # STABILITY
-
-
-
-                file_path_json = ds_dir / f"{model_name}_fold_model_posthoc_measures.json"
-                save_json(file_path_json, fold_models_explanations_measures[ds][model_name])
-
+        # --- MEASURE 2: SOC ----
+        soc_results = soc_all_methods_for_dataset(
+            dataset_name=ds,
+            method_fold_results=fold_models[ds],  # method -> folds
+            distance_type="euclidean",
+            force_recompute=args.overwrite,  # optional
+        )
+        soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
+        save_json(soc_json_path, soc_results)
 
     # print(fold_models_explanations["iris"]['dt'][0]['feature_attribution_pred_class'][0])
     # print(fold_models_explanations["iris"]['dt'][0]['y_pred'][0])

@@ -1,4 +1,5 @@
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.neural_network import MLPClassifier
 from dataset_functions import stratified_5fold_standardize, load_dataset
 from typing import List, Dict, Any
 from xgboost import XGBClassifier
@@ -568,6 +569,7 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
             "X_test": fold['X_test'],
             "y_train": fold['y_train'],
             "y_test": fold['y_test'],
+            "scaler": fold.get("scaler", None),
             "model": model,
             "performance_metrics":{
                 "accuracy_logits": float(acc_logits),
@@ -590,6 +592,211 @@ def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, de
         })
 
     return proto_models
+
+def MLP_5FOLD(folds, *, hidden_units=64, activation="relu", solver="adam", alpha=0.0001, random_state=42):
+    """
+        Train and evaluate an MLP Classifier with ONE hidden layer using 5-fold CV.
+
+        Parameters
+        ----------
+        dataset : str
+            Dataset name (for bookkeeping/logging consistency)
+        folds : dict
+            Dictionary of folds structured as:
+                fold_id:
+                    train_idx
+                    test_idx
+                    X_train
+                    X_test
+                    y_train
+                    y_test
+        hidden_units : int
+            Number of neurons in the single hidden layer
+        activation : str
+            Activation function ('relu', 'tanh', 'logistic')
+        solver : str
+            Optimization solver ('adam', 'sgd', 'lbfgs')
+        alpha : float
+            L2 regularization parameter
+        max_iter : int
+            Maximum training iterations
+        random_state : int
+            Random seed
+
+        Returns
+        -------
+        dict
+            Dictionary containing fold-wise models, predictions, and metrics
+        """
+
+    fold_results = []
+
+    for fold_id, fold in enumerate(folds):
+        X_train = fold["X_train"]
+        X_test = fold["X_test"]
+        y_train = fold["y_train"]
+        y_test = fold["y_test"]
+
+        # -----------------------------
+        # MLP with ONE hidden layer
+        # -----------------------------
+        model = MLPClassifier(
+            hidden_layer_sizes=(hidden_units,),
+            activation=activation,
+            solver="adam",
+            alpha=alpha,
+            learning_rate_init=1e-3,
+            early_stopping=True,  # dynamic stop
+            validation_fraction=0.1,  # hold-out from training fold
+            n_iter_no_change=30,  # patience
+            tol=1e-4,  # improvement threshold
+            max_iter=5000,  # just a safety ceiling
+            random_state=random_state
+        )
+
+        model.fit(X_train, y_train)
+
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)
+
+        # -----------------------------
+        # Performance Metrics
+        # -----------------------------
+        performance_metrics = {
+            "accuracy": accuracy_score(y_test, y_pred),
+            "f1_macro": f1_score(y_test, y_pred, average="macro"),
+            "precision_macro": precision_score(y_test, y_pred, average="macro", zero_division=0),
+            "recall_macro": recall_score(y_test, y_pred, average="macro", zero_division=0),
+        }
+
+        # -----------------------------
+        # Save fold results
+        # -----------------------------
+        fold_results.append({
+            "fold": fold_id,
+            "train_idx": fold['train_idx'],
+            "test_idx": fold['test_idx'],
+            "X_train": fold['X_train'],
+            "X_test": fold['X_test'],
+            "y_train": fold['y_train'],
+            "y_test": fold['y_test'],
+            "scaler": fold.get("scaler", None),
+            "model": model,
+            "y_pred": y_pred,
+            "y_pred_proba": y_proba,
+            "model_params": {
+                "hidden_units": hidden_units,
+                "activation": activation,
+                "solver": solver,
+                "alpha": alpha
+            },
+            "performance_metrics": performance_metrics
+        })
+
+    return fold_results
+
+def DNN_8HL_5fold(folds,
+    *,
+    hidden_layers=(512, 512, 256, 256, 128, 128, 64, 64),
+    activation="relu",
+    solver="adam",
+    alpha=0.0001,
+    max_iter=500,
+    random_state=42
+):
+    """
+        Train and evaluate a Deep Neural Network (8 hidden layers) using 5-fold CV.
+
+        Hidden architecture:
+            512 → 512 → 256 → 256 → 128 → 128 → 64 → 64
+
+        Parameters
+        ----------
+        dataset : str
+            Dataset name (for bookkeeping/logging consistency)
+        folds : dict
+            Dictionary of folds structured as:
+                fold_id:
+                    train_idx
+                    test_idx
+                    X_train
+                    X_test
+                    y_train
+                    y_test
+        hidden_layers : tuple
+            Sizes of hidden layers
+        activation : str
+            Activation function ('relu', 'tanh', 'logistic')
+        solver : str
+            Optimization solver ('adam', 'sgd', 'lbfgs')
+        alpha : float
+            L2 regularization parameter
+        max_iter : int
+            Maximum training iterations
+        random_state : int
+            Random seed
+
+        Returns
+        -------
+        dict
+            Dictionary containing fold-wise models, predictions, and metrics
+        """
+    fold_results = []
+    for fold_id, fold in enumerate(folds):
+        X_train = fold["X_train"]
+        X_test = fold["X_test"]
+        y_train = fold["y_train"]
+        y_test = fold["y_test"]
+
+        # -----------------------------
+        # Deep Neural Network
+        # -----------------------------
+        model = MLPClassifier(
+            hidden_layer_sizes=hidden_layers,
+            activation=activation,
+            solver=solver,
+            alpha=alpha,
+            max_iter=max_iter,
+            random_state=random_state
+        )
+
+        model.fit(X_train, y_train)
+
+        # -----------------------------
+        # Predictions
+        # -----------------------------
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)
+
+        # -----------------------------
+        # Performance Metrics
+        # -----------------------------
+        performance_metrics = {
+            "accuracy": accuracy_score(y_test, y_pred),
+            "f1_macro": f1_score(y_test, y_pred, average="macro"),
+            "precision_macro": precision_score(y_test, y_pred, average="macro", zero_division=0),
+            "recall_macro": recall_score(y_test, y_pred, average="macro", zero_division=0),
+        }
+
+        # -----------------------------
+        # Save fold results
+        # -----------------------------
+        fold_results.append({
+            "fold": fold_id,
+            "train_idx": fold['train_idx'],
+            "test_idx": fold['test_idx'],
+            "X_train": fold['X_train'],
+            "X_test": fold['X_test'],
+            "y_train": fold['y_train'],
+            "y_test": fold['y_test'],
+            "scaler": fold.get("scaler", None),
+            "model": model,
+            "y_pred": y_pred,
+            "y_pred_proba": y_proba,
+            "performance_metrics": performance_metrics
+        })
+
+    return fold_results
 
 if __name__ == "__main__":
     '''
