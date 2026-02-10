@@ -5,7 +5,7 @@ from posthoc_measures_functions import identity_measure, separability_measure, s
 from model_save_functions import save_model, load_model, save_json
 from pathlib import Path
 import argparse
-from direct_measures_functions import ria_measure, soc_all_methods_for_dataset
+from direct_measures_functions import ria_measure, soc_all_methods_for_dataset, feature_synergy_all_methods_for_dataset
 
 ALL_DATASETS = ["iris", "wine", "breast_cancer"]
 ALL_MODELS = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
@@ -110,14 +110,25 @@ def train_cli(args):
             save_json(file_path_json, fold_models[ds][model_name])
 
         # --- MEASURE 2: SOC ----
-        soc_results = soc_all_methods_for_dataset(
-            dataset_name=ds,
-            method_fold_results=fold_models[ds],  # method -> folds
-            distance_type="euclidean",
-            force_recompute=args.overwrite,  # optional
+        # soc_results = soc_all_methods_for_dataset(
+        #     dataset_name=ds,
+        #     method_fold_results=fold_models[ds],  # method -> folds
+        #     distance_type="euclidean",
+        #     force_recompute=args.overwrite,  # optional
+        # )
+        # soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
+        # save_json(soc_json_path, soc_results)
+
+        # --- MEASURE 3: Feasture Synergy ----
+        fs_all = feature_synergy_all_methods_for_dataset(
+            ds,
+            fold_models[ds],
+            n_generations=50,
+            n_runs=3,
+            include_accuracy_factor=True,
         )
-        soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
-        save_json(soc_json_path, soc_results)
+        fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
+        save_json(fs_json_path, fs_all)
 
     # print(fold_models_explanations["iris"]['dt'][0]['feature_attribution_pred_class'][0])
     # print(fold_models_explanations["iris"]['dt'][0]['y_pred'][0])
