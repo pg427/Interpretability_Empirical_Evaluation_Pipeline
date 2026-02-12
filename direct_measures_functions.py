@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from dataset_functions import load_dataset
+from dataclasses import dataclass
 
 from tqdm.auto import tqdm
 import time
@@ -1121,6 +1122,395 @@ def feature_synergy_all_methods_for_dataset(
 
     save_model(results, out_path)
     return results
+
+
+@dataclass(frozen=True)
+class FeatureRangeConstraint:
+    """Constraint Ci: keep feature f_idx within [alpha, beta] during mutation."""
+    f_idx: int
+    alpha: float
+    beta: float
+
+
+def robustness_measure(
+    dataset_name: str,
+    method_name: str,
+    folds: List[Dict[str, Any]],
+    *,
+    k_bins: int = 10,                    # number of bins per feature
+    binning: str = "quantile",           # "quantile" or "uniform"
+    use_constraints: bool = True,        # apply Ci to GA mutation (NeighbourRobustness)
+    N: int = 200,                        # population size
+    G: int = 100,                        # number of generations
+    gamma: float = 0.7,
+    mu: float = 0.2,
+    cf_only: bool = True,                # use only label-flipping candidates for E[d(x,c)]
+    min_cf_required: int = 1,            # skip x if fewer counterfactuals than this
+    max_instances_per_subpop: Optional[int] = None,  # cap instances per (feature,bin) subpopulation
+    random_state: int = 42,
+    progress: bool = True,               # NEW: allow disabling progress bars
+) -> Dict[str, Any]:
+    """
+    Robustness implementation (feature -> bins -> subpopulation -> instances -> GA),
+    with performance improvements:
+      1) Fewer tqdm objects: only folds + per-fold (feature,bin) "cells" bar.
+      2) Vectorized evaluate_batch (no Python loop over population for distance).
+      3) (Minor) avoid nested instance tqdm.
+
+    NOTE: This keeps your algorithmic structure the same.
+    """
+
+    if binning not in {"quantile", "uniform"}:
+        raise ValueError('binning must be "quantile" or "uniform"')
+
+    if progress and tqdm is None:
+        progress = False  # tqdm not available; silently disable
+
+    # --------------------
+    # Helpers: distance
+    # --------------------
+    def _var(v: np.ndarray) -> float:
+        v = np.asarray(v, dtype=float).ravel()
+        if v.size == 0:
+            return 0.0
+        mu_v = float(np.mean(v))
+        return float(np.mean((v - mu_v) ** 2))
+
+    # (Kept for use when scoring CF distances; fast enough there)
+    def norm_euclid(x: np.ndarray, c: np.ndarray, eps: float = 1e-12) -> float:
+        x = np.asarray(x, dtype=float).ravel()
+        c = np.asarray(c, dtype=float).ravel()
+        denom = _var(x) + _var(c)
+        if denom < eps:
+            return 0.0 if np.allclose(x, c, atol=1e-9, rtol=0.0) else 1.0
+        return float(np.clip(0.5 * (_var(x - c) / denom), 0.0, 1.0))
+
+    # --------------------
+    # Helpers: binning
+    # --------------------
+    def make_bins(values: np.ndarray, k: int) -> List[Tuple[float, float]]:
+        v = np.asarray(values, dtype=float)
+        if k <= 0:
+            raise ValueError("k_bins must be >= 1")
+
+        if binning == "quantile":
+            edges = np.quantile(v, q=np.linspace(0, 1, k + 1))
+        else:
+            edges = np.linspace(np.min(v), np.max(v), k + 1)
+
+        edges = np.unique(edges)
+        if edges.size < 2:
+            return [(float(v[0]), float(v[0]))]
+
+        return [(float(edges[i]), float(edges[i + 1])) for i in range(edges.size - 1)]
+
+    # --------------------
+    # Helpers: model
+    # --------------------
+    def predict_label(model: Any, X: np.ndarray) -> np.ndarray:
+        y = np.asarray(model.predict(X))
+        if y.ndim == 2:
+            return np.argmax(y, axis=1)
+        return y.astype(int)
+
+    # --------------------
+    # GA parts
+    # --------------------
+    def select_top(P: np.ndarray, fit: np.ndarray, N_: int) -> np.ndarray:
+        order = np.argsort(-fit)
+        return P[order[:N_]]
+
+    def crossover_two_point(rng: np.random.Generator, P: np.ndarray, m_: int, gamma_: float) -> np.ndarray:
+        Pc = P.copy()
+        idx = rng.permutation(Pc.shape[0])
+        for kk in range(0, Pc.shape[0] - 1, 2):
+            if rng.random() <= gamma_:
+                i1, i2 = idx[kk], idx[kk + 1]
+                a = int(rng.integers(0, m_))
+                b = int(rng.integers(0, m_))
+                lo, hi = (a, b) if a <= b else (b, a)
+                tmp = Pc[i1, lo:hi].copy()
+                Pc[i1, lo:hi] = Pc[i2, lo:hi]
+                Pc[i2, lo:hi] = tmp
+        return Pc
+
+    def mutate_empirical(
+        rng: np.random.Generator,
+        P: np.ndarray,
+        feat_values: List[np.ndarray],
+        m_: int,
+        mu_: float,
+        constraint: Optional[FeatureRangeConstraint],
+    ) -> np.ndarray:
+        Pm = P.copy()
+        for ii in range(Pm.shape[0]):
+            if rng.random() <= mu_:
+                fj = int(rng.integers(0, m_))
+                vals = feat_values[fj]
+                Pm[ii, fj] = float(vals[int(rng.integers(0, vals.shape[0]))])
+
+                if constraint is not None:
+                    fi = constraint.f_idx
+                    vals_fi = feat_values[fi]
+                    mask = (vals_fi >= constraint.alpha) & (vals_fi <= constraint.beta)
+                    if np.any(mask):
+                        feasible = vals_fi[mask]
+                        Pm[ii, fi] = float(feasible[int(rng.integers(0, feasible.shape[0]))])
+                    else:
+                        Pm[ii, fi] = float(np.clip(Pm[ii, fi], constraint.alpha, constraint.beta))
+        return Pm
+
+    # --------------------
+    # NEW: Vectorized evaluate_batch
+    # --------------------
+    def evaluate_batch_vectorized(model: Any, P: np.ndarray, x: np.ndarray, y_x: int) -> np.ndarray:
+        """
+        One predict for the whole population + vectorized NormEuclid.
+        """
+        yP = predict_label(model, P)
+        I_diff = (yP != y_x).astype(float)
+
+        x_row = x.reshape(1, -1)
+        I_same = np.all(P == x_row, axis=1).astype(float)
+
+        # Vectorized NormEuclid d(x, P[i])
+        mean_x = x.mean()
+        var_x = ((x - mean_x) ** 2).mean()
+
+        mean_P = P.mean(axis=1)
+        var_P = ((P - mean_P[:, None]) ** 2).mean(axis=1)
+
+        diff = x_row - P
+        mean_diff = diff.mean(axis=1)
+        var_diff = ((diff - mean_diff[:, None]) ** 2).mean(axis=1)
+
+        denom = var_x + var_P
+        d = np.where(
+            denom < 1e-12,
+            np.where(I_same > 0, 0.0, 1.0),
+            0.5 * (var_diff / denom),
+        )
+        d = np.clip(d, 0.0, 1.0)
+
+        return I_diff + (1.0 - d) - I_same
+
+    def genetic_alg(
+        rng: np.random.Generator,
+        model: Any,
+        x: np.ndarray,
+        y_x: int,  # NEW: pass y_x to avoid recomputing predict_label(x)
+        feat_values: List[np.ndarray],
+        m_: int,
+        *,
+        N_: int,
+        G_: int,
+        gamma_: float,
+        mu_: float,
+        constraint: Optional[FeatureRangeConstraint],
+    ) -> np.ndarray:
+        P = np.repeat(x.reshape(1, -1), repeats=N_, axis=0)  # P0
+        fit = evaluate_batch_vectorized(model, P, x, y_x)
+
+        for _ in range(G_):
+            P_sel = select_top(P, fit, N_)
+            P_cross = crossover_two_point(rng, P_sel, m_, gamma_)
+            P_mut = mutate_empirical(rng, P_cross, feat_values, m_, mu_, constraint)
+            fit = evaluate_batch_vectorized(model, P_mut, x, y_x)
+            P = P_mut
+
+        return P
+
+    def _tuple_keys_to_str(d):
+        return {f"{fi}|{bj}": v for (fi, bj), v in d.items()}
+    # --------------------
+    # Main loop (folds)
+    # --------------------
+    rng_master = np.random.default_rng(random_state)
+    m = int(np.asarray(folds[0]["X_test"]).shape[1])
+
+    cell_sum: Dict[Tuple[int, int], float] = {}
+    cell_count: Dict[Tuple[int, int], int] = {}
+    cell_nx: Dict[Tuple[int, int], int] = {}
+    per_fold_debug = []
+
+    fold_iter = (
+        tqdm(enumerate(folds), total=len(folds), desc=f"{dataset_name}/{method_name} folds")
+        if progress else enumerate(folds)
+    )
+
+    for fold_idx, fold in fold_iter:
+        rng = np.random.default_rng(int(rng_master.integers(0, 2**31 - 1)))
+        X_test = np.asarray(fold["X_test"], dtype=float)
+        model = fold.get("model", None)
+        if model is None:
+            raise ValueError('fold["model"] is required.')
+
+        # NOTE: if you want train-distribution mutation, swap to fold["X_train"]
+        feat_values = [X_test[:, j].astype(float) for j in range(m)]
+        fold_cells_used = 0
+
+        # Precompute number of cells for this fold to drive a single progress bar
+        if progress:
+            total_cells = 0
+            for fi in range(m):
+                total_cells += len(make_bins(X_test[:, fi], k_bins))
+            cell_pbar = tqdm(total=total_cells, desc=f"fold {fold_idx} cells", leave=False)
+        else:
+            cell_pbar = None
+
+        for fi in range(m):
+            bins = make_bins(X_test[:, fi], k_bins)
+            for bj, (alpha, beta) in enumerate(bins):
+                # Update cell progress early
+                if cell_pbar is not None:
+                    cell_pbar.update(1)
+
+                # Subpopulation indices
+                if bj == len(bins) - 1:
+                    mask = (X_test[:, fi] >= alpha) & (X_test[:, fi] <= beta)
+                else:
+                    mask = (X_test[:, fi] >= alpha) & (X_test[:, fi] < beta)
+
+                idxs = np.where(mask)[0]
+                if idxs.size == 0:
+                    continue
+
+                if max_instances_per_subpop is not None and idxs.size > max_instances_per_subpop:
+                    idxs = rng.choice(idxs, size=int(max_instances_per_subpop), replace=False)
+
+                constraint = FeatureRangeConstraint(fi, alpha, beta) if use_constraints else None
+
+                cell_scores = []
+
+                # No nested tqdm here (much cheaper)
+                for j in idxs:
+                    x = X_test[j]
+                    y_x = int(predict_label(model, x.reshape(1, -1))[0])
+
+                    P_G = genetic_alg(
+                        rng, model, x, y_x, feat_values, m,
+                        N_=N, G_=G, gamma_=gamma, mu_=mu, constraint=constraint
+                    )
+
+                    if cf_only:
+                        y_P = predict_label(model, P_G)
+                        CF = P_G[y_P != y_x]
+                    else:
+                        CF = P_G
+
+                    if CF.shape[0] < min_cf_required:
+                        continue
+
+                    # (This part is fine to keep simple; CF is usually smaller than N)
+                    dists = np.array([norm_euclid(x, CF[t]) for t in range(CF.shape[0])], dtype=float)
+                    cell_scores.append(float(np.mean(dists)))
+
+                if not cell_scores:
+                    continue
+
+                key = (fi, bj)
+                cell_sum[key] = cell_sum.get(key, 0.0) + float(np.mean(cell_scores))
+                cell_count[key] = cell_count.get(key, 0) + 1
+                cell_nx[key] = cell_nx.get(key, 0) + len(cell_scores)
+                fold_cells_used += 1
+
+                if cell_pbar is not None:
+                    cell_pbar.set_postfix({"cells_used": fold_cells_used, "subpop_n": int(len(idxs))})
+
+        if cell_pbar is not None:
+            cell_pbar.close()
+
+        per_fold_debug.append({"fold": int(fold.get("fold", fold_idx)), "cells_used": int(fold_cells_used)})
+
+    cell_means = {k: (cell_sum[k] / cell_count[k]) for k in cell_sum.keys()}
+    overall = float(np.mean(list(cell_means.values()))) if cell_means else float("nan")
+    cell_means_json = _tuple_keys_to_str(cell_means)
+    cell_nx_json = _tuple_keys_to_str(cell_nx)
+
+    return {
+        "dataset": dataset_name,
+        "method": method_name,
+        "overall_robustness": overall,
+        "cell_means": cell_means_json,
+        "cell_instances_used": cell_nx_json,
+        "per_fold": per_fold_debug,
+        "config": {
+            "k_bins": int(k_bins),
+            "binning": binning,
+            "use_constraints": bool(use_constraints),
+            "N": int(N), "G": int(G), "gamma": float(gamma), "mu": float(mu),
+            "cf_only": bool(cf_only),
+            "min_cf_required": int(min_cf_required),
+            "max_instances_per_subpop": max_instances_per_subpop,
+            "random_state": int(random_state),
+        },
+    }
+
+
+def robustness_all_methods_for_dataset(
+    dataset: str,
+    fold_models_for_dataset: Dict[str, Any],
+    *,
+    methods: Optional[Iterable[str]] = None,
+    k_bins: int = 10,
+    binning: str = "quantile",
+    use_constraints: bool = True,
+    N: int = 200,
+    G: int = 100,
+    gamma: float = 0.7,
+    mu: float = 0.2,
+    cf_only: bool = True,
+    min_cf_required: int = 1,
+    max_instances_per_subpop: Optional[int] = None,
+    random_state: int = 42,
+    progress: bool = True,  # NEW
+) -> Dict[str, Any]:
+
+    out_path = base_dir / dataset / f"{dataset}_robustness_all_methods.joblib"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if out_path.exists():
+        return load_model(out_path)
+
+    if methods is None:
+        methods = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
+
+    results: Dict[str, Any] = {"dataset_name": dataset, "by_method": {}}
+
+    method_list = list(methods)
+    method_iter = tqdm(method_list, desc=f"{dataset} methods") if (progress and tqdm) else method_list
+
+    for method in method_iter:
+        mth = str(method).lower().strip()
+        if mth not in fold_models_for_dataset:
+            continue
+
+        res_m = robustness_measure(
+            dataset,
+            mth,
+            fold_models_for_dataset[mth],
+            k_bins=k_bins,
+            binning=binning,
+            use_constraints=use_constraints,
+            N=N,
+            G=G,
+            gamma=gamma,
+            mu=mu,
+            cf_only=cf_only,
+            min_cf_required=min_cf_required,
+            max_instances_per_subpop=max_instances_per_subpop,
+            random_state=random_state,
+            progress=progress,
+        )
+        results["by_method"][mth] = res_m
+
+    save_model(results, out_path)
+    return results
+
+
+
+
+
 
 
 

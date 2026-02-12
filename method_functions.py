@@ -442,20 +442,58 @@ class TabularProtoPNet(nn.Module):
         logits = torch.stack(logits, dim=1)  # [B, C]
         return logits, sim, dists
 
-# @torch.no_grad()
-# def project_prototypes_to_train(model: TabularProtoPNet, X_train_t: torch.Tensor, device: str, use_amp: bool):
-#     """
-#     ProtoPNet-style "projection": snap each prototype onto its nearest encoded training point.
-#     This stabilizes training and makes prototypes represent real training embeddings.
-#     """
-#     model.eval()
-#     X_train_t = X_train_t.to(device)
-#     with torch.amp.autocast("cuda", enabled=use_amp):
-#         z_train = model.encoder(X_train_t)                    # [N, D]
-#         # distances prototypes -> training embeddings
-#         d = torch.cdist(model.prototypes, z_train, p=2) ** 2  # [P, N]
-#         nn_idx = d.argmin(dim=1)                              # [P]
-#         model.prototypes.copy_(z_train[nn_idx])
+    @torch.no_grad()
+    def predict(self, X, *, batch_size: int = 4096, device: str | None = None) -> np.ndarray:
+        """
+        sklearn-like: returns hard class labels (argmax over logits).
+        Accepts numpy arrays or torch tensors.
+        """
+        self.eval()
+
+        if device is None:
+            device = next(self.parameters()).device.type
+        dev = torch.device(device)
+
+        # Convert to tensor
+        if isinstance(X, np.ndarray):
+            X_t = torch.from_numpy(X.astype(np.float32, copy=False))
+        else:
+            X_t = X.detach() if torch.is_tensor(X) else torch.tensor(X, dtype=torch.float32)
+
+        preds = []
+        for start in range(0, X_t.shape[0], batch_size):
+            xb = X_t[start:start + batch_size].to(dev, non_blocking=True)
+            out = self(xb)  # (logits, sim, dists)
+            logits = out[0]
+            yb = torch.argmax(logits, dim=1)
+            preds.append(yb.cpu())
+
+        return torch.cat(preds, dim=0).numpy().astype(int)
+
+    @torch.no_grad()
+    def predict_proba(self, X, *, batch_size: int = 4096, device: str | None = None) -> np.ndarray:
+        """
+        sklearn-like: returns probabilities via softmax(logits).
+        """
+        self.eval()
+
+        if device is None:
+            device = next(self.parameters()).device.type
+        dev = torch.device(device)
+
+        if isinstance(X, np.ndarray):
+            X_t = torch.from_numpy(X.astype(np.float32, copy=False))
+        else:
+            X_t = X.detach() if torch.is_tensor(X) else torch.tensor(X, dtype=torch.float32)
+
+        probs = []
+        for start in range(0, X_t.shape[0], batch_size):
+            xb = X_t[start:start + batch_size].to(dev, non_blocking=True)
+            logits, _, _ = self(xb)
+            pb = torch.softmax(logits, dim=1)
+            probs.append(pb.cpu())
+
+        return torch.cat(probs, dim=0).numpy()
 
 
 def PROTOPNET_5FOLD(folds, *, epochs=100, lr=0.001, n_prototypes_per_class=3, device=None, average="macro", batch_size = 32, use_amp=True, num_workers=0,weight_decay=1e-4, project_every=5, tau=1.0):

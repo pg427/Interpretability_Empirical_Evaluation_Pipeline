@@ -5,7 +5,7 @@ from posthoc_measures_functions import identity_measure, separability_measure, s
 from model_save_functions import save_model, load_model, save_json
 from pathlib import Path
 import argparse
-from direct_measures_functions import ria_measure, soc_all_methods_for_dataset, feature_synergy_all_methods_for_dataset
+from direct_measures_functions import ria_measure, soc_all_methods_for_dataset, feature_synergy_all_methods_for_dataset, robustness_all_methods_for_dataset
 
 ALL_DATASETS = ["iris", "wine", "breast_cancer"]
 ALL_MODELS = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
@@ -53,10 +53,6 @@ def train_cli(args):
         ria_results = ria_measure((X, y, feature_names), ds)
         ria_json_path = (base_dir / ds) / f"{ds}_ria.json"
         save_json(ria_json_path, ria_results)
-
-
-
-
 
         folds_stand = stratified_5fold_standardize(X, y)
         folds_unstand = stratified_5fold_standardize(X, y, standardize=False)
@@ -119,16 +115,26 @@ def train_cli(args):
         # soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
         # save_json(soc_json_path, soc_results)
 
-        # --- MEASURE 3: Feasture Synergy ----
-        fs_all = feature_synergy_all_methods_for_dataset(
+        # --- MEASURE 3: Feature Synergy ----
+        # fs_all = feature_synergy_all_methods_for_dataset(
+        #     ds,
+        #     fold_models[ds],
+        #     n_generations=50,
+        #     n_runs=3,
+        #     include_accuracy_factor=True,
+        # )
+        # fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
+        # save_json(fs_json_path, fs_all)
+
+        # --- MEASURE 4: Robustness ----
+        rs_all = robustness_all_methods_for_dataset(
             ds,
             fold_models[ds],
-            n_generations=50,
-            n_runs=3,
-            include_accuracy_factor=True,
+            N=10,
+            G=2
         )
-        fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
-        save_json(fs_json_path, fs_all)
+        rs_json_path = (base_dir / ds) / f"{ds}_rs_all_methods.json"
+        save_json(rs_json_path, rs_all)
 
     # print(fold_models_explanations["iris"]['dt'][0]['feature_attribution_pred_class'][0])
     # print(fold_models_explanations["iris"]['dt'][0]['y_pred'][0])
