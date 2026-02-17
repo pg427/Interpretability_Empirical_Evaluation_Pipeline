@@ -16,6 +16,8 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from dataset_functions import load_dataset
 from dataclasses import dataclass
+import skexplain
+from itertools import combinations
 
 from tqdm.auto import tqdm
 import time
@@ -475,7 +477,7 @@ def feature_synergy_measure(
     folds,
     *,
     pop_size: int = 200,
-    n_generations: int = 150,
+    n_generations: int = 100,
     n_runs: int = 10,
     parent_count: int = 100,
     crossover_prob: float = 0.9,
@@ -1508,10 +1510,298 @@ def robustness_all_methods_for_dataset(
     return results
 
 
+def _patch_skexplain_run_parallel():
+    """
+    Python 3.14 + skexplain workaround:
+    skexplain's run_parallel does copy(args_iterator) where args_iterator can be itertools.product,
+    which raises:
+        TypeError: cannot pickle 'itertools.product' object
+
+    BUT: global_explainer often imports run_parallel directly, so patch both:
+      - skexplain.common.multiprocessing_utils.run_parallel
+      - skexplain.main.global_explainer.run_parallel
+    """
+    import skexplain.common.multiprocessing_utils as mp_utils
+    import skexplain.main.global_explainer as global_explainer
+
+    # if we've patched already, skip
+    if getattr(mp_utils, "_patched_iter_copy_bug", False):
+        # still ensure the global_explainer alias points to the patched version
+        if getattr(global_explainer, "run_parallel", None) is not mp_utils.run_parallel:
+            global_explainer.run_parallel = mp_utils.run_parallel
+        return
+
+    _orig_run_parallel = mp_utils.run_parallel
+
+    def _run_parallel_wrapper(*args, **kwargs):
+        # Handle kwargs style
+        if "args_iterator" in kwargs:
+            ai = kwargs["args_iterator"]
+            if not isinstance(ai, list):
+                kwargs["args_iterator"] = list(ai)
+            return _orig_run_parallel(*args, **kwargs)
+
+        # Handle positional style: run_parallel(func, args_iterator, ...)
+        if len(args) >= 2:
+            args = list(args)
+            ai = args[1]
+            if not isinstance(ai, list):
+                args[1] = list(ai)
+            return _orig_run_parallel(*args, **kwargs)
+
+        return _orig_run_parallel(*args, **kwargs)
+
+    # Patch in both modules
+    mp_utils.run_parallel = _run_parallel_wrapper
+    mp_utils._patched_iter_copy_bug = True
+
+    # Critical: also patch the imported alias in global_explainer
+    global_explainer.run_parallel = _run_parallel_wrapper
+
+
+def _patch_numpy_percentile_interpolation():
+    """
+    NumPy 2.x removed `interpolation=` from np.percentile in favor of `method=`.
+    skexplain still uses `interpolation=...`, so we shim it.
+    """
+    import numpy as _np
+
+    if getattr(_np, "_patched_percentile_interpolation", False):
+        return
+
+    _orig = _np.percentile
+
+    def _percentile_wrapper(a, q, *args, **kwargs):
+        # If skexplain passes interpolation="lower", map -> method="lower"
+        if "interpolation" in kwargs and "method" not in kwargs:
+            kwargs["method"] = kwargs.pop("interpolation")
+        elif "interpolation" in kwargs and "method" in kwargs:
+            # If both are provided, drop interpolation to avoid errors
+            kwargs.pop("interpolation", None)
+        return _orig(a, q, *args, **kwargs)
+
+    _np.percentile = _percentile_wrapper
+    _np._patched_percentile_interpolation = True
+
+
+# ============================================================
+#  NF (Number of Features Used)
+# ============================================================
+
+def _number_of_features_used(
+    model,
+    X: np.ndarray,
+    *,
+    M: int = 200,
+    random_state: int = 42,
+):
+    rng = np.random.default_rng(random_state)
+
+    X = np.asarray(X)
+    n, p = X.shape
+    M = min(M, n)
+
+    idx = rng.choice(n, size=M, replace=False)
+    Xs = X[idx].copy()
+
+    base_pred = model.predict(Xs)
+    used_mask = np.zeros(p, dtype=bool)
+
+    for j in range(p):
+        Xp = Xs.copy()
+
+        donor_idx = rng.integers(0, M, size=M)
+        donor_idx[donor_idx == np.arange(M)] = (donor_idx[donor_idx == np.arange(M)] + 1) % M
+
+        Xp[:, j] = Xs[donor_idx, j]
+
+        pert_pred = model.predict(Xp)
+
+        if np.any(pert_pred != base_pred):
+            used_mask[j] = True
+
+    return {
+        "NF": int(np.sum(used_mask)),
+        "used_mask": used_mask,
+    }
 
 
 
+def mec_all_methods_for_datasets(
+        dataset: str,
+        fold_models_for_dataset: Dict[str, Any],
+        *,
+        methods: Optional[Iterable[str]] = None,
+        n_bins: int = 20,
+        subsample: float = 1.0,
+        n_bootstrap: int = 1,
+        mec_max_segments: int = 10,
+        mec_approx_error: float = 0.05,
+        nf_M: int = 200,
+        progress: bool = True,
+        n_jobs: int = 1,
+) -> Dict[str, Any]:
+    """
+    Computes:
+      - 1D ALE for all features
+      - IAS (overall interaction strength) via explainer.interaction_strength(ale=ale_1d, ...)
+      - MEC via explainer.main_effect_complexity(ale_1d, ...)
+      - NF (Number of Features Used) via your Algorithm-1 style perturbation
 
+    Notes:
+      - Uses your existing caching pattern with base_dir (must exist as a Path in this module).
+      - Requires the helper patches:
+          _patch_numpy_percentile_interpolation()
+          _patch_skexplain_run_parallel()
+      - Requires helper:
+          _number_of_features_used(...)
+    """
 
+    out_path = base_dir / dataset / f"{dataset}_mec_all_methods.joblib"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if out_path.exists():
+        return load_model(out_path)
+
+    if methods is None:
+        methods = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
+
+    # Apply patches once up-front (safe to call repeatedly)
+    _patch_numpy_percentile_interpolation()
+    _patch_skexplain_run_parallel()
+
+    results: Dict[str, Any] = {
+        "dataset_name": dataset,
+        "by_method": {},
+        "config": {
+            "n_bins": n_bins,
+            "subsample": subsample,
+            "n_bootstrap": n_bootstrap,
+            "mec_max_segments": mec_max_segments,
+            "mec_approx_error": mec_approx_error,
+            "nf_M": nf_M,
+            "n_jobs": n_jobs,
+        },
+    }
+
+    method_iter = tqdm(methods, desc=f"{dataset} MEC") if (progress and tqdm) else methods
+
+    for method in method_iter:
+        mth = str(method).lower().strip()
+        if mth not in fold_models_for_dataset:
+            continue
+
+        folds = fold_models_for_dataset[mth]
+        if not folds:
+            continue
+
+        method_results: Dict[str, Any] = {"folds": []}
+
+        for fold_data in folds:
+            fold_id = fold_data["fold"]
+            X_train = np.asarray(fold_data["X_train"])
+            y_train = np.asarray(fold_data["y_train"])
+            X_test = np.asarray(fold_data["X_test"])
+            model = fold_data["model"]
+
+            feature_names = fold_data.get(
+                "feature_names",
+                [f"f{i}" for i in range(X_train.shape[1])]
+            )
+
+            estimator_name = f"{mth}_fold{fold_id}"
+
+            explainer = skexplain.ExplainToolkit(
+                estimators=(estimator_name, model),  # your skexplain version needs a tuple
+                X=X_train,
+                y=y_train,
+                feature_names=feature_names,         # required when X is numpy
+            )
+
+            # -----------------------------
+            #  1D ALE (all features)
+            # -----------------------------
+            ale_1d = explainer.ale(
+                features="all",
+                n_bins=n_bins,
+                subsample=subsample,
+                n_bootstrap=n_bootstrap,
+                n_jobs=n_jobs,
+            )
+
+            # -----------------------------
+            #  IAS (overall) per tutorial:
+            #     ias = explainer.interaction_strength(ale=ale_1d, ...)
+            # -----------------------------
+            ias_ds = explainer.interaction_strength(
+                ale=ale_1d,
+                subsample=subsample,
+                n_bootstrap=n_bootstrap,
+            )
+
+            # robust scalar extraction from xarray.Dataset
+            ias_numeric_vars = [
+                v for v in ias_ds.data_vars
+                if np.issubdtype(ias_ds[v].dtype, np.number)
+            ]
+            if not ias_numeric_vars:
+                raise RuntimeError(
+                    f"interaction_strength returned no numeric data_vars. Got: "
+                    f"{[(k, str(ias_ds[k].dtype), ias_ds[k].shape) for k in ias_ds.data_vars]}"
+                )
+            _ias_vals = np.asarray(ias_ds[ias_numeric_vars[0]].values, dtype=float).reshape(-1)
+            ias_overall = float(np.mean(_ias_vals))  # mean across bootstraps if present
+
+            # -----------------------------
+            #  MEC per docs:
+            #     mec = explainer.main_effect_complexity(ale_1d, ...)
+            # -----------------------------
+            mec_dict = explainer.main_effect_complexity(
+                ale_1d,
+                estimator_names=estimator_name,
+                max_segments=mec_max_segments,
+                approx_error=mec_approx_error,
+            )
+            mec_value = float(mec_dict[estimator_name])
+
+            # -----------------------------
+            #  NF (your Algorithm 1)
+            # -----------------------------
+            nf_result = _number_of_features_used(
+                model,
+                X_test,
+                M=nf_M,
+            )
+
+            method_results["folds"].append({
+                "fold": fold_id,
+                "feature_names": list(feature_names),
+                "ale_1d": ale_1d,          # xarray Dataset (can be large)
+                "ias_overall": ias_overall,
+                "ias_ds": ias_ds,          # optional, but useful for debugging
+                "mec": mec_value,
+                "nf": nf_result,
+            })
+
+        # -----------------------------
+        #  Aggregate across folds
+        # -----------------------------
+        mec_vals = [f["mec"] for f in method_results["folds"]]
+        nf_vals = [f["nf"]["NF"] for f in method_results["folds"]]
+        ias_vals = [f["ias_overall"] for f in method_results["folds"]]
+
+        method_results["aggregate"] = {
+            "ias_mean": float(np.mean(ias_vals)) if ias_vals else None,
+            "ias_std": float(np.std(ias_vals)) if ias_vals else None,
+            "mec_mean": float(np.mean(mec_vals)) if mec_vals else None,
+            "mec_std": float(np.std(mec_vals)) if mec_vals else None,
+            "nf_mean": float(np.mean(nf_vals)) if nf_vals else None,
+            "nf_std": float(np.std(nf_vals)) if nf_vals else None,
+            "n_folds": int(len(method_results["folds"])),
+        }
+
+        results["by_method"][mth] = method_results
+
+    save_model(results, out_path)
+    return results
 

@@ -5,7 +5,7 @@ from posthoc_measures_functions import identity_measure, separability_measure, s
 from model_save_functions import save_model, load_model, save_json
 from pathlib import Path
 import argparse
-from direct_measures_functions import ria_measure, soc_all_methods_for_dataset, feature_synergy_all_methods_for_dataset, robustness_all_methods_for_dataset
+from direct_measures_functions import ria_measure, soc_all_methods_for_dataset, feature_synergy_all_methods_for_dataset, robustness_all_methods_for_dataset, mec_all_methods_for_datasets
 
 ALL_DATASETS = ["iris", "wine", "breast_cancer"]
 ALL_MODELS = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
@@ -106,35 +106,43 @@ def train_cli(args):
             save_json(file_path_json, fold_models[ds][model_name])
 
         # --- MEASURE 2: SOC ----
-        # soc_results = soc_all_methods_for_dataset(
-        #     dataset_name=ds,
-        #     method_fold_results=fold_models[ds],  # method -> folds
-        #     distance_type="euclidean",
-        #     force_recompute=args.overwrite,  # optional
-        # )
-        # soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
-        # save_json(soc_json_path, soc_results)
+        soc_results = soc_all_methods_for_dataset(
+            dataset_name=ds,
+            method_fold_results=fold_models[ds],  # method -> folds
+            distance_type="euclidean",
+            force_recompute=args.overwrite,  # optional
+        )
+        soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
+        save_json(soc_json_path, soc_results)
 
         # --- MEASURE 3: Feature Synergy ----
-        # fs_all = feature_synergy_all_methods_for_dataset(
-        #     ds,
-        #     fold_models[ds],
-        #     n_generations=50,
-        #     n_runs=3,
-        #     include_accuracy_factor=True,
-        # )
-        # fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
-        # save_json(fs_json_path, fs_all)
+        fs_all = feature_synergy_all_methods_for_dataset(
+            ds,
+            fold_models[ds],
+            n_generations=200,
+            n_runs=10,
+            include_accuracy_factor=True,
+        )
+        fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
+        save_json(fs_json_path, fs_all)
 
         # --- MEASURE 4: Robustness ----
         rs_all = robustness_all_methods_for_dataset(
             ds,
             fold_models[ds],
-            N=10,
-            G=2
+            N=200,
+            G=100
         )
         rs_json_path = (base_dir / ds) / f"{ds}_rs_all_methods.json"
         save_json(rs_json_path, rs_all)
+
+        # --- MEASURE 5: No. of features, Interaction Strength, Main Effect Complexity ----
+        mec_all = mec_all_methods_for_datasets(
+            ds,
+            fold_models[ds],
+        )
+        mec_json_path = (base_dir / ds) / f"{ds}_mec_all_methods.json"
+        save_json(mec_json_path, mec_all)
 
     # print(fold_models_explanations["iris"]['dt'][0]['feature_attribution_pred_class'][0])
     # print(fold_models_explanations["iris"]['dt'][0]['y_pred'][0])

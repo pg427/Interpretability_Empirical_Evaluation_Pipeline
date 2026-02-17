@@ -8,7 +8,8 @@ import numpy as np
 import math
 
 def _to_json_safe(obj: Any):
-    """Recursively convert numpy objects to JSON-safe Python types."""
+    """Recursively convert numpy/xarray objects to JSON-safe Python types."""
+    # --- numpy scalars/arrays ---
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (np.integer,)):
@@ -20,6 +21,20 @@ def _to_json_safe(obj: Any):
     if isinstance(obj, float):
         return None if not math.isfinite(obj) else obj
 
+    # --- xarray (skexplain ALE/IAs outputs) ---
+    try:
+        import xarray as xr
+        if isinstance(obj, (xr.Dataset, xr.DataArray)):
+            return {
+                "__xarray__": obj.__class__.__name__,
+                "dims": dict(obj.sizes) if hasattr(obj, "sizes") else None,
+                "data_vars": list(getattr(obj, "data_vars", {}).keys()),
+                "coords": list(getattr(obj, "coords", {}).keys()),
+            }
+    except Exception:
+        pass
+
+    # --- dict/list recursion ---
     if isinstance(obj, dict):
         return {
             k: _to_json_safe(v)
@@ -30,9 +45,12 @@ def _to_json_safe(obj: Any):
     if isinstance(obj, list):
         return [_to_json_safe(v) for v in obj]
 
+    # --- sklearn objects ---
     if obj.__class__.__module__.startswith("sklearn."):
         return f"<{obj.__class__.__name__}>"
+
     return obj
+
 
 def save_model(model: Any, output_path: Path) -> None:
     '''
