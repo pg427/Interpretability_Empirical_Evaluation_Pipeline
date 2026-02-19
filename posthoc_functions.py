@@ -123,7 +123,24 @@ def XGB_5fold_shap(dataset, folds, *, random_state = 42, max_samples=None):
 
             y_pred = dt_model.predict(X_test)
             class_idx = np.array([np.where(dt_model.classes_==y)[0][0] for y in y_pred])
-            sv_pred = sv[np.arange(len(X_test)), :, class_idx]
+
+            # Case A: multiclass often returns a list: [ (n, f), (n, f), ... ] length = n_classes
+            if isinstance(sv, list):
+                # stack to (n, f, c)
+                sv_all = np.stack(sv, axis=2)
+                sv_pred = sv_all[np.arange(len(X_test)), :, class_idx]
+
+            # Case B: some setups return (n, f, c) already
+            elif getattr(sv, "ndim", None) == 3:
+                sv_all = sv
+                sv_pred = sv_all[np.arange(len(X_test)), :, class_idx]
+
+            # Case C: binary/single-output returns (n, f) only
+            elif getattr(sv, "ndim", None) == 2:
+                sv_all = sv
+                # no per-class axis exists; best definition of "pred class" is just the same attribution
+                sv_pred = sv_all
+
             XGB_5fold_model_shap.append({
                 "fold": fold['fold'],
                 "train_idx": fold['train_idx'],
