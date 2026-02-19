@@ -125,7 +125,32 @@ def XGB_5FOLD(folds, *, random_state = 42):
         y_train = fold['y_train']
         X_test = fold['X_test']
         y_test = fold['y_test']
-        model = XGBClassifier(n_estimators = 50, early_stopping_rounds = 1, random_state=random_state, objective = "multi:softprob")
+
+        n_classes = np.unique(y_train).size
+        if n_classes < 2:
+            raise ValueError(
+                f"Fold {fold.get('fold', fold_idx)}: degenerate labels (n_classes={n_classes}). "
+                f"Unique={np.unique(y_train)}"
+            )
+
+        if n_classes == 2:
+            model = XGBClassifier(
+                n_estimators=50,
+                early_stopping_rounds=1,
+                random_state=random_state,
+                objective="binary:logistic",
+                eval_metric="logloss",
+            )
+        else:
+            model = XGBClassifier(
+                n_estimators=50,
+                early_stopping_rounds=1,
+                random_state=random_state,
+                objective="multi:softprob",
+                num_class=n_classes,
+                eval_metric="mlogloss",
+            )
+
         model.fit(X_train, y_train, eval_set=[(X_test, y_test)])
         y_pred = model.predict(X_test)
 
