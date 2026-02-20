@@ -685,16 +685,39 @@ def feature_synergy_measure(
 
         # ---- XGB ----
         if m == "xgb":
+            # Ensure 1D labels
+            ytr = np.asarray(y_train).ravel()
+            yte = np.asarray(y_test).ravel()
+
+            n_classes = np.unique(ytr).size
+            # if n_classes <= 0:
+            #     return 0.0  # defensive; should never happen now
+            # if n_classes == 1:
+            #     # Degenerate fold (only one class in train). Accuracy = fraction of that class in test.
+            #     majority = 0
+            #     y_pred = np.full_like(yte, fill_value=majority)
+            #     return float(accuracy_score(yte, y_pred))
+            if n_classes == 2:
+                objective = "binary:logistic"
+                eval_metric = "logloss"
+                extra = {}
+            else:
+                objective = "multi:softprob"
+                eval_metric = "mlogloss"
+                extra = {"num_class": n_classes}
+
             model = XGBClassifier(
                 n_estimators=50,
                 early_stopping_rounds=1,
                 random_state=random_state,
-                objective="multi:softprob",
-                eval_metric="mlogloss",
+                objective=objective,
+                eval_metric=eval_metric,
+                **extra,
             )
-            model.fit(Xtr, y_train, eval_set=[(Xte, y_test)], verbose=False)
+
+            model.fit(Xtr, ytr, eval_set=[(Xte, yte)], verbose=False)
             y_pred = model.predict(Xte)
-            return float(accuracy_score(y_test, y_pred))
+            return float(accuracy_score(yte, y_pred))
 
         # ---- MLP (1 hidden layer) ----
         if m == "mlp":
