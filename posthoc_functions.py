@@ -138,7 +138,7 @@ def XGB_5fold_shap(dataset, folds, *, random_state = 42, max_samples=None):
             # Case C: binary/single-output returns (n, f) only
             elif getattr(sv, "ndim", None) == 2:
                 sv_all = sv
-                # no per-class axis exists; best definition of "pred class" is just the same attribution
+                # no per-class axis exists;best definition of "pred class" is just the same attribution
                 sv_pred = sv_all
 
             XGB_5fold_model_shap.append({

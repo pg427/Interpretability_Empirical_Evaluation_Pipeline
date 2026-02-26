@@ -6,6 +6,7 @@ from posthoc_functions import shap_attributions
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from posthoc_functions import rebuild_explainer_from_fold
+from scipy.stats import spearmanr, pearsonr
 
 base_dir = Path.cwd()/"trained_models"
 
@@ -460,3 +461,135 @@ def stability_measure(dataset, method, folds, *, random_state:int = 42):
         save_model(fold_model_shap_stability, stability_path)
 
     return fold_model_shap_stability
+
+def parsimony_measure(dataset, method, folds, *, tol: float=1e-12):
+    parsimony_path = base_dir / dataset / f"{method}_fold_model_shap_parsimony.joblib"
+    fold_model_shap_parsimony = []
+
+    if parsimony_path.exists():
+        fold_model_shap_parsimony = load_model(parsimony_path)
+    else:
+        for fold_idx, fold in enumerate(folds):
+            sv_pred = fold['feature_attribution_pred_class']
+            nonzero_mask = np.abs(sv_pred) > tol
+            non_zero_weights_per_instance = np.sum(nonzero_mask, axis=1)
+            parsimony_per_instance = non_zero_weights_per_instance / sv_pred.shape[1]
+            parsimony_averaged = np.mean(parsimony_per_instance)
+            fold_model_shap_parsimony.append({
+                "fold": fold["fold"],
+                "train_idx": fold["train_idx"],
+                "test_idx": fold["test_idx"],
+                "X_train": fold["X_train"],
+                "X_test": fold["X_test"],
+                "y_train": fold["y_train"],
+                "y_test": fold["y_test"],
+                "scaler": fold.get("scaler", None),
+                "performance_metrics": fold.get("performance_metrics", None),
+
+                "feature_attribution_all_classes": fold.get("feature_attribution_all_classes", None),
+                "feature_attribution_pred_class": fold.get("feature_attribution_pred_class", None),
+                "y_pred": fold.get("y_pred", None),
+
+                # Parsimony outputs
+                "parsimony_tol": tol,
+                "parsimony_shap_explanation_per_test_instance": non_zero_weights_per_instance,
+                "avg_shap_parsimony_per_test_instance": parsimony_per_instance,
+                "total_parsimony_averaged_test": parsimony_averaged
+            })
+
+        save_model(fold_model_shap_parsimony, parsimony_path)
+
+    return fold_model_shap_parsimony
+
+def faithfulness_measure(dataset, method, folds, *, corr_method: str = "spearman"):
+    faithfulness_path = base_dir / dataset / f"{method}_fold_model_faithfulness.joblib"
+    fold_model_shap_faithfulness = []
+
+    if faithfulness_path.exists():
+        fold_model_shap_faithfulness = load_model(faithfulness_path)
+    else:
+        for fold_idx, fold in enumerate(folds):
+            model = fold["model"]
+            X_train = np.asarray(fold["X_train"])
+            X_test = np.asarray(fold["X_test"])
+
+            w_test = np.asarray(fold["feature_attribution_pred_class"])  # (n_test, d)
+            y_pred = np.asarray(fold["y_pred"])
+
+            n_test, d = X_test.shape
+
+            # ---- choose baseline vector b (length d) ----
+            b = np.nanmean(X_train, axis=0)
+
+            P = model.predict_proba(X_test)
+
+            c_idx = y_pred.astype(int)
+
+            p_c = P[np.arange(n_test), c_idx]
+            deltas = np.zeros((n_test, d), dtype=float)
+
+            for j in range(d):
+                X_pert = X_test.copy()
+                X_pert[:, j] = b[j]  # "remove" feature j
+                P_pert = model.predict_proba(X_pert)
+                p_c_pert = P_pert[np.arange(n_test), c_idx]
+                deltas[:, j] = p_c - p_c_pert
+
+            faithfulness_per_instance = []
+            corr_vals = []
+
+            for i in range(n_test):
+                w_i = w_test[i, :]
+                w_i = np.abs(w_i)
+
+                delta_i = deltas[i, :]
+
+                w_i = np.asarray(w_i).ravel()
+                delta_i = np.asarray(delta_i).ravel()
+
+                if corr_method == "spearman":
+                    r, _ = spearmanr(w_i, delta_i)
+                elif corr_method == "pearson":
+                    r, _ = pearsonr(w_i, delta_i)
+                corr_vals.append(r)
+
+                faithfulness_per_instance.append({
+                    "test_instance_id": int(i),
+                    "explained_class": int(c_idx[i]),
+                    "p_class_original": float(p_c[i]),
+                    "faithfulness_corr": float(r),
+                    # Optional debug payload (comment out if you want smaller artifacts):
+                    "importance_vector": w_test[i, :].astype(float),
+                    "effect_vector": delta_i.astype(float),
+                })
+
+            corr_vals_np = np.asarray(corr_vals, dtype=float)
+            valid = ~np.isnan(corr_vals_np)
+            faithfulness_score = float(np.mean(corr_vals_np[valid])) if np.any(valid) else float("nan")
+
+            fold_model_shap_faithfulness.append({
+                "fold": fold["fold"],
+                "train_idx": fold["train_idx"],
+                "test_idx": fold["test_idx"],
+                "X_train": fold["X_train"],
+                "X_test": fold["X_test"],
+                "y_train": fold["y_train"],
+                "y_test": fold.get("y_test", None),
+                "scaler": fold["scaler"],
+                "model": fold["model"],
+                "performance_metrics": fold["performance_metrics"],
+                "feature_attribution_all_classes": fold.get("feature_attribution_all_classes", None),
+                "feature_attribution_pred_class": fold["feature_attribution_pred_class"],
+                "y_pred": fold["y_pred"],
+                "faithfulness_corr_method": corr_method,
+
+                # Stored artifacts:
+                "faithfulness_baseline_vector": b.astype(float),
+                "faithfulness_effects": deltas.astype(float),  # Δ matrix (n_test, d)
+                "faithfulness_per_instance": faithfulness_per_instance,
+                "faithfulness_total_test_avg": faithfulness_score,
+            })
+
+        save_model(fold_model_shap_faithfulness, faithfulness_path)
+
+    return fold_model_shap_faithfulness
