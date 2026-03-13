@@ -1779,13 +1779,23 @@ def mec_all_methods_for_datasets(
             #  MEC per docs:
             #     mec = explainer.main_effect_complexity(ale_1d, ...)
             # -----------------------------
-            mec_dict = explainer.main_effect_complexity(
-                ale_1d,
-                estimator_names=estimator_name,
-                max_segments=mec_max_segments,
-                approx_error=mec_approx_error,
-            )
-            mec_value = float(mec_dict[estimator_name])
+            try:
+                mec_dict = explainer.main_effect_complexity(
+                    ale_1d,
+                    estimator_names=estimator_name,
+                    max_segments=mec_max_segments,
+                    approx_error=mec_approx_error,
+                )
+                mec_value = float(mec_dict[estimator_name])
+
+            except ZeroDivisionError as e:
+                if "Weights sum to zero" not in str(e):
+                    raise
+                print(
+                    f"[WARN] MEC weights sum to zero for dataset={dataset}, "
+                    f"method={mth}, fold={fold_id}. Using mec=0.0."
+                )
+                mec_value = 0.0
 
             # -----------------------------
             #  NF (your Algorithm 1)
