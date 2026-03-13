@@ -1,10 +1,15 @@
-from sklearn.datasets import load_iris, load_wine, load_breast_cancer
+from sklearn.datasets import load_iris, load_wine, load_breast_cancer, fetch_openml
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from typing import Tuple, List, Dict, Any, Optional
 import numpy as np
+from ucimlrepo import fetch_ucirepo
+import pandas as pd
 
-def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def load_dataset(name: str,
+    *,
+    higgs_sample_size: int | None = None,
+    random_state: int = 42) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     '''
     This function loads the dataset from sklearn.datasets and returns X, y and feature names
 
@@ -17,15 +22,92 @@ def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
 
     if name == "iris":
         ds = load_iris()
+        X = ds.data.astype(np.float32)
+        y = ds.target.astype(int)
+        feature_names = list(ds.feature_names)
+
     elif name == "wine":
         ds = load_wine()
+        X = ds.data.astype(np.float32)
+        y = ds.target.astype(int)
+        feature_names = list(ds.feature_names)
+
     elif name == "breast_cancer":
         ds = load_breast_cancer()
+        X = ds.data.astype(np.float32)
+        y = ds.target.astype(int)
+        feature_names = list(ds.feature_names)
+
+    elif name == "german_credit":
+        # Fetch dataset
+        dataset = fetch_ucirepo(id=522)
+        X_df = dataset.data.features
+        y_df = dataset.data.targets
+
+        # Convert categorical variables to numeric
+        X_df = pd.get_dummies(X_df, drop_first=True)
+        X = X_df.values.astype(np.float32)
+        y = y_df.values.squeeze().astype(int)
+        feature_names = list(X_df.columns)
+
+    elif name == "arcene":
+        # OpenML ARCENE
+        ds = fetch_openml(name="arcene", version=1, as_frame=True)
+
+        X_df = ds.data.copy()
+        y_series = pd.Series(ds.target).copy()
+
+        # ARCENE labels are often strings like '1' and '-1'
+        X = X_df.to_numpy(dtype=np.float32)
+        y = y_series.astype(int).to_numpy()
+
+        # optional: map {-1, 1} -> {0, 1}
+        unique_vals = set(np.unique(y))
+        if unique_vals == {-1, 1}:
+            y = ((y + 1) // 2).astype(int)
+
+        feature_names = [str(c) for c in X_df.columns]
+
+    elif name == "isolet":
+        # OpenML ISOLET
+        ds = fetch_openml(name="isolet", version=1, as_frame=True)
+
+        X_df = ds.data.copy()
+        y_series = pd.Series(ds.target).copy()
+
+        X = X_df.to_numpy(dtype=np.float32)
+
+        # ISOLET target may come as strings; convert to integer labels
+        y = y_series.astype(int).to_numpy()
+
+        # if labels are 1..26 and you want 0..25:
+        if y.min() == 1:
+            y = y - 1
+
+        feature_names = [str(c) for c in X_df.columns]
+
+    elif name == "higgs":
+        # UCI HIGGS
+        dataset = fetch_ucirepo(id=280)
+        X_df = dataset.data.features.copy()
+        y_df = dataset.data.targets.copy()
+
+        # convert target
+        y = pd.Series(y_df.iloc[:, 0]).astype(int).to_numpy()
+
+        # optional subsampling because full HIGGS is massive
+        if higgs_sample_size is not None:
+            rng = np.random.default_rng(random_state)
+            idx = rng.choice(len(X_df), size=higgs_sample_size, replace=False)
+            X_df = X_df.iloc[idx].reset_index(drop=True)
+            y = y[idx]
+
+        X = X_df.to_numpy(dtype=np.float32)
+        feature_names = [str(c) for c in X_df.columns]
+
     else:
         raise ValueError(f"Unknown dataset: {name}")
-    X = ds.data.astype(np.float32)
-    y = ds.target.astype(int)
-    feature_names = list(ds.feature_names)
+
     return X, y, feature_names
 
 def stratified_5fold_standardize(X: np.ndarray, y: np.ndarray, standardize: bool = True, shuffle: bool = True, random_state: int = 42):

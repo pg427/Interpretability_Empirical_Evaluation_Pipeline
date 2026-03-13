@@ -7,6 +7,7 @@ from sklearn.cluster import DBSCAN, KMeans
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from posthoc_functions import rebuild_explainer_from_fold
 from scipy.stats import spearmanr, pearsonr
+from sklearn.linear_model import LinearRegression
 
 base_dir = Path.cwd()/"trained_models"
 
@@ -593,3 +594,209 @@ def faithfulness_measure(dataset, method, folds, *, corr_method: str = "spearman
         save_model(fold_model_shap_faithfulness, faithfulness_path)
 
     return fold_model_shap_faithfulness
+
+
+
+def _sample_gaussian_neighborhood(x, n_samples=100, sigma=0.1, random_state=42):
+    """
+    Sample perturbations around a point x from N(x, sigma^2 I).
+    """
+    rng = np.random.default_rng(random_state)
+    x = np.asarray(x, dtype=float).reshape(1, -1)
+    return rng.normal(loc=x, scale=sigma, size=(n_samples, x.shape[1]))
+
+
+def _fit_local_linear_surrogate(
+    model,
+    x_center,
+    *,
+    class_idx,
+    n_samples=100,
+    sigma=0.1,
+    kernel_width=None,
+    random_state=42
+):
+    """
+    Fit a local weighted linear surrogate around x_center for the predicted-class probability.
+    Returns the fitted surrogate and the sampled neighborhood.
+    """
+    x_center = np.asarray(x_center, dtype=float).reshape(1, -1)
+    d = x_center.shape[1]
+
+    if kernel_width is None:
+        kernel_width = np.sqrt(d)
+
+    X_nbhd = _sample_gaussian_neighborhood(
+        x_center.ravel(),
+        n_samples=n_samples,
+        sigma=sigma,
+        random_state=random_state
+    )
+
+    # black-box target: predicted probability for a fixed class
+    y_bb = model.predict_proba(X_nbhd)[:, class_idx]
+
+    # locality weights centered at x_center
+    distances = np.linalg.norm(X_nbhd - x_center, axis=1)
+    weights = np.exp(-(distances ** 2) / (kernel_width ** 2 + 1e-12))
+
+    surrogate = LinearRegression()
+    surrogate.fit(X_nbhd, y_bb, sample_weight=weights)
+
+    return surrogate, X_nbhd, y_bb
+
+def _count_nonzero_coefficients(coef, tol=1e-12):
+    """
+    Count coefficients whose absolute value is greater than tol.
+    """
+    coef = np.asarray(coef, dtype=float)
+    return int(np.sum(np.abs(coef) > tol))
+
+def neighborhood_fidelity_comprehensibility_stability_measures(dataset,
+    method,
+    folds,
+    *,
+    n_samples: int = 100,
+    sigma: float = 0.1,
+    kernel_width=None,
+    max_test_samples=None,
+    n_perturbations: int = 20,
+    random_state: int = 42,
+    tol: float = 1e-12):
+    """
+        Combined fold-wise computation of:
+          1. Neighborhood Fidelity
+          2. Comprehensibility (count of non-zero coefficients)
+          3. Stability
+
+        Lower neighborhood fidelity is better.
+        Lower stability is better.
+        Lower non-zero count means greater comprehensibility.
+        """
+
+    combined_path = base_dir / dataset / f"{method}_fold_model_nf_comp_stability.joblib"
+    fold_model_results = []
+
+    if combined_path.exists():
+        fold_model_results = load_model(combined_path)
+    else:
+        for fold_idx, fold in enumerate(folds):
+            model = fold["model"]
+            X_test = np.asarray(fold["X_test"])
+            y_test = np.asarray(fold["y_test"])
+
+            if max_test_samples is not None and len(X_test) > max_test_samples:
+                X_test = X_test[:max_test_samples]
+                y_test = y_test[:max_test_samples]
+                test_idx = fold["test_idx"][:len(X_test)]
+            else:
+                test_idx = fold["test_idx"]
+
+            y_pred = model.predict(X_test)
+            class_indices = np.array([
+                np.where(model.classes_ == y)[0][0] for y in y_pred
+            ])
+
+            point_nf_scores = []
+            surrogate_coefficients = []
+            surrogate_intercepts = []
+            surrogate_nonzero_coefficients = []
+            point_stability_scores = []
+
+            for i, x in enumerate(X_test):
+                c_idx = class_indices[i]
+
+                surrogate, X_nbhd, y_bb = _fit_local_linear_surrogate(
+                    model,
+                    x,
+                    class_idx=c_idx,
+                    n_samples=n_samples,
+                    sigma=sigma,
+                    kernel_width=kernel_width,
+                    random_state=random_state + i
+                )
+
+                y_sur = surrogate.predict(X_nbhd)
+                nf_i = np.mean((y_sur - y_bb) ** 2)
+
+                coef_i = np.asarray(surrogate.coef_, dtype=float)
+                nonzero_count_i = _count_nonzero_coefficients(coef_i, tol=tol)
+
+                point_nf_scores.append(float(nf_i))
+                surrogate_coefficients.append(surrogate.coef_.copy())
+                surrogate_intercepts.append(float(surrogate.intercept_))
+                surrogate_nonzero_coefficients.append(nonzero_count_i)
+
+                # nearby perturbed centers x' ~ N_x
+                X_prime = _sample_gaussian_neighborhood(
+                    x,
+                    n_samples=n_perturbations,
+                    sigma=sigma,
+                    random_state=random_state + 10_000 + i
+                )
+
+                local_diffs = []
+
+                for j, x_prime in enumerate(X_prime):
+                    surrogate_prime, _, _ = _fit_local_linear_surrogate(
+                        model,
+                        x_prime,
+                        class_idx=c_idx,  # keep same explained class as x
+                        n_samples=n_samples,
+                        sigma=sigma,
+                        kernel_width=kernel_width,
+                        random_state=random_state + 20_000 + i * 1_000 + j
+                    )
+
+                    coef_i_prime = np.asarray(surrogate_prime.coef_, dtype=float)
+
+                    ### THIS PART IS DIFFERENT FROM PLUMB ET AL. WHERE THE SAME IS DONE VIA MSE
+                    num = np.dot(coef_i, coef_i_prime)
+                    den = np.linalg.norm(coef_i) * np.linalg.norm(coef_i_prime) + 1e-12
+                    cos_sim = num / den
+                    diff = (1 - cos_sim) / 2
+
+                    local_diffs.append(float(diff))
+
+                point_stability_scores.append(float(np.mean(local_diffs)))
+
+            surrogate_nonzero_coefficients = np.asarray(surrogate_nonzero_coefficients, dtype=int)
+            point_nf_scores = np.asarray(point_nf_scores, dtype=float)
+            point_stability_scores = np.asarray(point_stability_scores, dtype=float)
+            surrogate_intercepts = np.asarray(surrogate_intercepts, dtype=float)
+            surrogate_coefficients = np.asarray(surrogate_coefficients, dtype=float)
+
+            fold_model_results.append({
+                "fold": fold["fold"],
+                "train_idx": fold["train_idx"],
+                "test_idx": test_idx,
+                "X_train": fold["X_train"],
+                "X_test": X_test,
+                "y_train": fold["y_train"],
+                "y_test": y_test,
+                "scaler": fold["scaler"],
+                "model": fold["model"],
+                "performance_metrics": fold["performance_metrics"],
+                "y_pred": y_pred,
+
+                # Surrogate Model for each test point
+                "surrogate_coefficients": np.asarray(surrogate_coefficients),
+                "surrogate_intercepts": np.asarray(surrogate_intercepts),
+
+                # comprehensibility
+                "surrogate_nonzero_coefficients": surrogate_nonzero_coefficients,
+                "fold_mean_nonzero_coefficients": float(np.mean(surrogate_nonzero_coefficients)),
+                "fold_std_nonzero_coefficients": float(np.std(surrogate_nonzero_coefficients, ddof=0)),
+
+                # neighborhood fidelity
+                "pointwise_neighborhood_fidelity": point_nf_scores,
+                "fold_neighborhood_fidelity": float(np.mean(point_nf_scores)),
+
+                # stability
+                "pointwise_stability": point_stability_scores,
+                "fold_stability": float(np.mean(point_stability_scores))
+            })
+
+        save_model(fold_model_results, combined_path)
+
+    return fold_model_results
