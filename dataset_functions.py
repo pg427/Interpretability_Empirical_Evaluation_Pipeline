@@ -61,10 +61,10 @@ def load_dataset(name: str,
         X = X_df.to_numpy(dtype=np.float32)
         y = y_series.astype(int).to_numpy()
 
-        # optional: map {-1, 1} -> {0, 1}
-        unique_vals = set(np.unique(y))
-        if unique_vals == {-1, 1}:
-            y = ((y + 1) // 2).astype(int)
+        # force binary labels to 0/1
+        unique_vals = np.unique(y)
+        if len(unique_vals) == 2:
+            y = (y == unique_vals.max()).astype(int)
 
         feature_names = [str(c) for c in X_df.columns]
 
