@@ -660,7 +660,7 @@ def feature_synergy_measure(
     # -----------------------------
     # Subset evaluation (per mask)
     # -----------------------------
-    def _accuracy_for_fold(mask: np.ndarray, fold: Dict[str, Any]) -> float:
+    def _accuracy_for_fold_ARCHIVE(mask: np.ndarray, fold: Dict[str, Any]) -> float:
         """
         Train a fresh model for the requested method on masked features and return test accuracy.
         This is the analog of repo's "evaluate error by CV" but integrated with your fold splits.
@@ -815,6 +815,33 @@ def feature_synergy_measure(
             return float((y_pred == yte_t).float().mean().detach().cpu().item())
 
         raise RuntimeError("Unreachable")
+
+    def _accuracy_for_fold(mask: np.ndarray, fold: Dict[str, Any]) -> float:
+        """
+        FAST PROXY VERSION:
+        Reuse the already-trained fold model.
+        For unselected features, zero them out instead of retraining on a reduced feature set.
+        This is much faster and good for testing / scaling to large datasets.
+        """
+        if mask.sum() <= 0:
+            return 0.0
+
+        X_test = np.asarray(fold["X_test"], dtype=np.float32).copy()
+        y_test = np.asarray(fold["y_test"])
+        model = fold["model"]
+
+        keep = mask.astype(bool)
+
+        # Zero out unselected features
+        X_test[:, ~keep] = 0.0
+
+        # CBR expects object arrays sometimes
+        if m == "cbr":
+            X_test = np.asarray(X_test, dtype=object)
+
+        y_pred = model.predict(X_test)
+        return float(accuracy_score(y_test, y_pred))
+
 
     def _eval_mask(mask: np.ndarray) -> Tuple[float, int]:
         """
