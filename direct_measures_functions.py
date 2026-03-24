@@ -1675,7 +1675,34 @@ def _number_of_features_used(
         "used_mask": used_mask,
     }
 
+def _safe_ale_feature_subset(
+    X: np.ndarray,
+    feature_names: list[str],
+    *,
+    min_unique: int = 2,
+) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """
+    Keep only features that have at least `min_unique` unique finite values.
+    Returns:
+        X_safe, feature_names_safe, kept_idx
+    """
+    X = np.asarray(X)
+    kept_idx = []
 
+    for j in range(X.shape[1]):
+        col = X[:, j]
+        col = col[np.isfinite(col)]
+        if np.unique(col).size >= min_unique:
+            kept_idx.append(j)
+
+    kept_idx = np.asarray(kept_idx, dtype=int)
+
+    if kept_idx.size == 0:
+        raise ValueError("No ALE-safe features found in this fold.")
+
+    X_safe = X[:, kept_idx]
+    feature_names_safe = [feature_names[j] for j in kept_idx]
+    return X_safe, feature_names_safe, kept_idx
 
 def mec_all_methods_for_datasets(
         dataset: str,
@@ -1759,6 +1786,12 @@ def mec_all_methods_for_datasets(
                 [f"f{i}" for i in range(X_train.shape[1])]
             )
 
+            X_train_ale, feature_names_ale, kept_idx = _safe_ale_feature_subset(
+                X_train,
+                feature_names,
+                min_unique=2,
+            )
+
             estimator_name = f"{mth}_fold{fold_id}"
 
             explainer = skexplain.ExplainToolkit(
@@ -1772,7 +1805,7 @@ def mec_all_methods_for_datasets(
             #  1D ALE (all features)
             # -----------------------------
             ale_1d = explainer.ale(
-                features="all",
+                features=feature_names_ale,
                 n_bins=n_bins,
                 subsample=subsample,
                 n_bootstrap=n_bootstrap,
@@ -1841,6 +1874,10 @@ def mec_all_methods_for_datasets(
                 "ias_ds": ias_ds,          # optional, but useful for debugging
                 "mec": mec_value,
                 "nf": nf_result,
+                "ale_feature_names": feature_names_ale,
+                "ale_kept_idx": kept_idx.tolist(),
+                "ale_n_features_used": int(len(feature_names_ale)),
+                "ale_n_features_dropped": int(X_train.shape[1] - len(feature_names_ale)),
             })
 
         # -----------------------------
