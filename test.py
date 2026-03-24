@@ -111,8 +111,10 @@ def train_cli(args):
         fs_all = feature_synergy_all_methods_for_dataset(
             ds,
             fold_models[ds],
+            pop_size= 50,
             n_generations=2,
             n_runs=2,
+            parent_count=25,
             include_accuracy_factor=True,
         )
         fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
