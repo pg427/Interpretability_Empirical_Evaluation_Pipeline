@@ -133,13 +133,13 @@ def train_cli(args):
         # save_json(rs_json_path, rs_all)
 
         # # --- MEASURE 5: No. of features, Interaction Strength, Main Effect Complexity ----
-        mec_all = mec_all_methods_for_datasets(
-            ds,
-            fold_models[ds]
-        )
-
-        mec_json_path = (base_dir / ds) / f"{ds}_mec_all_methods.json"
-        save_json(mec_json_path, mec_all)
+        # mec_all = mec_all_methods_for_datasets(
+        #     ds,
+        #     fold_models[ds]
+        # )
+        #
+        # mec_json_path = (base_dir / ds) / f"{ds}_mec_all_methods.json"
+        # save_json(mec_json_path, mec_all)
 
         # # --- ALL SURROGATE MEASURES ----
         # surrogate_measures = {}
