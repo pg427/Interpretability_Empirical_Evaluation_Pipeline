@@ -108,17 +108,17 @@ def train_cli(args):
         # save_json(soc_json_path, soc_results)
 
         # --- MEASURE 3: Feature Synergy ----
-        # fs_all = feature_synergy_all_methods_for_dataset(
-        #     ds,
-        #     fold_models[ds],
-        #     pop_size= 60,
-        #     n_generations=30,
-        #     n_runs=3,
-        #     parent_count=30,
-        #     include_accuracy_factor=False,
-        # )
-        # fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
-        # save_json(fs_json_path, fs_all)
+        fs_all = feature_synergy_all_methods_for_dataset(
+            ds,
+            fold_models[ds],
+            pop_size= 60,
+            n_generations=30,
+            n_runs=3,
+            parent_count=30,
+            include_accuracy_factor=False,
+        )
+        fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
+        save_json(fs_json_path, fs_all)
 
         # # --- MEASURE 4: Robustness ----
         # rs_all = robustness_all_methods_for_dataset(

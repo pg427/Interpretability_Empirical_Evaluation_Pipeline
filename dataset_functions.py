@@ -5,6 +5,9 @@ from typing import Tuple, List, Dict, Any, Optional
 import numpy as np
 from ucimlrepo import fetch_ucirepo
 import pandas as pd
+import io
+import zipfile
+import urllib.request
 
 def load_dataset(name: str,
     *,
@@ -39,16 +42,30 @@ def load_dataset(name: str,
         feature_names = list(ds.feature_names)
 
     elif name == "german_credit":
-        # Fetch dataset
-        dataset = fetch_ucirepo(id=522)
-        X_df = dataset.data.features
-        y_df = dataset.data.targets
+        url = "https://archive.ics.uci.edu/static/public/522/south%2Bgerman%2Bcredit.zip"
 
-        # Convert categorical variables to numeric
+        with urllib.request.urlopen(url) as response:
+            zip_bytes = response.read()
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            with zf.open("SouthGermanCredit.asc") as f:
+                df = pd.read_csv(f, sep=r"\s+")
+
+        X_df = df.drop(columns=["kredit"]).copy()
+        y = df["kredit"].to_numpy()
+
+        unique_vals = np.sort(pd.unique(y))
+        if len(unique_vals) != 2:
+            raise ValueError(f"Expected binary target for german_credit, got labels: {unique_vals}")
+
+        if not np.array_equal(unique_vals, np.array([0, 1])):
+            y = (y == unique_vals.max()).astype(int)
+
         X_df = pd.get_dummies(X_df, drop_first=True)
-        X = X_df.values.astype(np.float32)
-        y = y_df.values.squeeze().astype(int)
-        feature_names = list(X_df.columns)
+
+        X = X_df.to_numpy(dtype=np.float32)
+        y = y.astype(int)
+        feature_names = [str(c) for c in X_df.columns]
 
     elif name == "arcene":
         # OpenML ARCENE
