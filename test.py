@@ -137,6 +137,7 @@ def train_cli(args):
             ds,
             fold_models[ds]
         )
+
         mec_json_path = (base_dir / ds) / f"{ds}_mec_all_methods.json"
         save_json(mec_json_path, mec_all)
 

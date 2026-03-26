@@ -4,6 +4,7 @@ import pandas as pd
 from sklearn.feature_selection import mutual_info_classif, f_classif
 from pathlib import Path
 from model_save_functions import save_model, load_model
+from model_save_functions import save_model, load_model, save_json
 
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neural_network import MLPClassifier
@@ -1825,20 +1826,20 @@ def mec_all_methods_for_datasets(
       - MEC from that ALE dataset
       - NF on X_test
 
-    Important design choice:
-      We DO NOT reinsert dropped features into the ALE dataset.
-      IAS and MEC are computed only on ALE-valid features.
-      This avoids xarray/skexplain inconsistencies such as missing
-      __bin_values variables and invalid fabricated ALE curves.
+    Checkpointing behavior:
+      - saves one joblib per method
+      - loads existing per-method files on restart
+      - also saves one aggregate joblib at the end
     """
-    out_path = base_dir / dataset / f"{dataset}_mec_all_methods.joblib"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = base_dir / dataset
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if out_path.exists() and not force_recompute:
-        return load_model(out_path)
+    aggregate_path = out_dir / f"{dataset}_mec_all_methods.joblib"
 
     if methods is None:
-        methods = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
+        methods = ["dt", "xgb", "mlp", "dnn", "proto","cbr"]
+
+    methods = [str(m).lower().strip() for m in methods]
 
     _patch_numpy_percentile_interpolation()
     _patch_skexplain_run_parallel()
@@ -1865,6 +1866,15 @@ def mec_all_methods_for_datasets(
     for method in method_iter:
         mth = str(method).lower().strip()
         if mth not in fold_models_for_dataset:
+            continue
+
+        method_joblib_path = out_dir / f"{dataset}_{mth}_mec.joblib"
+        method_json_path = out_dir / f"{dataset}_{mth}_mec.json"
+
+        # Resume from per-method checkpoint
+        if method_joblib_path.exists() and not force_recompute:
+            print(f"[MEC] Loading cached result for method: {mth}")
+            results["by_method"][mth] = load_model(method_joblib_path)
             continue
 
         folds = fold_models_for_dataset[mth]
@@ -1930,7 +1940,6 @@ def mec_all_methods_for_datasets(
                     feature_names=list(feature_names),
                 )
 
-                # ALE only on safe subset
                 ale_1d = explainer.ale(
                     features=feature_names_ale,
                     n_bins=used_n_bins,
@@ -1941,7 +1950,6 @@ def mec_all_methods_for_datasets(
 
                 fold_result["ale_1d"] = ale_1d
 
-                # IAS only on ALE-valid features
                 ias_ds = explainer.interaction_strength(
                     ale=ale_1d,
                     subsample=used_subsample,
@@ -1949,7 +1957,6 @@ def mec_all_methods_for_datasets(
                 )
                 ias_overall = _extract_first_numeric_mean(ias_ds)
 
-                # MEC only on ALE-valid features
                 try:
                     mec_dict = explainer.main_effect_complexity(
                         ale_1d,
@@ -2007,8 +2014,13 @@ def mec_all_methods_for_datasets(
                 "n_folds_error": len(method_results["folds"]),
             }
 
+        # Save checkpoint immediately after finishing each method
+        save_model(method_results, method_joblib_path)
         results["by_method"][mth] = method_results
 
-    save_model(results, out_path)
-    return results
+        # Also refresh aggregate checkpoint after each method
+        save_model(results, aggregate_path)
+        save_json(method_json_path, method_results)
 
+    save_model(results, aggregate_path)
+    return results
