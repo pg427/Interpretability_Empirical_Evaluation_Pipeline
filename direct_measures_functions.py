@@ -1679,12 +1679,21 @@ def _safe_ale_feature_subset(
     X: np.ndarray,
     feature_names: list[str],
     *,
-    min_unique: int = 2,
+    min_unique: int = 3,
+    min_non_missing: int = 10,
+    max_features: Optional[int] = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray]:
     """
-    Keep only features that have at least `min_unique` unique finite values.
-    Returns:
-        X_safe, feature_names_safe, kept_idx
+    Keep only features that are safe for ALE.
+
+    Criteria:
+      - finite values exist
+      - at least `min_non_missing` finite observations
+      - at least `min_unique` unique finite values
+
+    Returns
+    -------
+    X_safe, feature_names_safe, kept_idx
     """
     X = np.asarray(X)
     kept_idx = []
@@ -1692,58 +1701,145 @@ def _safe_ale_feature_subset(
     for j in range(X.shape[1]):
         col = X[:, j]
         col = col[np.isfinite(col)]
-        if np.unique(col).size >= min_unique:
-            kept_idx.append(j)
+
+        if col.size < min_non_missing:
+            continue
+
+        if np.unique(col).size < min_unique:
+            continue
+
+        kept_idx.append(j)
 
     kept_idx = np.asarray(kept_idx, dtype=int)
 
     if kept_idx.size == 0:
         raise ValueError("No ALE-safe features found in this fold.")
 
+    if max_features is not None and kept_idx.size > max_features:
+        # Keep the most variable safe features to limit ALE cost on Arcene-like data
+        vars_kept = np.nanvar(X[:, kept_idx], axis=0)
+        order = np.argsort(vars_kept)[::-1][:max_features]
+        kept_idx = kept_idx[order]
+
     X_safe = X[:, kept_idx]
     feature_names_safe = [feature_names[j] for j in kept_idx]
     return X_safe, feature_names_safe, kept_idx
 
+
+def _effective_subsample_size(n_rows: int, subsample: float | int) -> int:
+    """
+    Estimate how many rows ALE will effectively use.
+    """
+    if isinstance(subsample, (int, np.integer)):
+        if subsample <= 0:
+            return n_rows
+        return min(int(subsample), n_rows)
+
+    if isinstance(subsample, float):
+        if subsample <= 0:
+            return n_rows
+        if subsample <= 1:
+            return max(1, int(np.floor(n_rows * subsample)))
+        return min(int(subsample), n_rows)
+
+    return n_rows
+
+
+def _choose_arcene_safe_ale_params(
+    X_train_ale: np.ndarray,
+    requested_n_bins: int,
+    requested_subsample: float | int,
+) -> tuple[int, float | int]:
+    """
+    Pick conservative ALE params for high-dimensional / low-sample settings.
+
+    Arcene-like datasets are especially fragile for ALE, so we cap bins
+    aggressively based on effective sample size.
+    """
+    n_rows = int(X_train_ale.shape[0])
+    eff_n = _effective_subsample_size(n_rows, requested_subsample)
+
+    # Keep more data if the requested subsample is too small
+    subsample = requested_subsample
+    if eff_n < 20:
+        subsample = 1.0
+        eff_n = n_rows
+    elif eff_n < 40 and isinstance(subsample, float) and subsample < 0.5:
+        subsample = 0.5
+        eff_n = _effective_subsample_size(n_rows, subsample)
+
+    # Conservative bins for ALE stability
+    if eff_n < 30:
+        n_bins = 2
+    elif eff_n < 60:
+        n_bins = min(requested_n_bins, 3)
+    elif eff_n < 100:
+        n_bins = min(requested_n_bins, 4)
+    else:
+        n_bins = min(requested_n_bins, 5)
+
+    n_bins = max(2, int(n_bins))
+    return n_bins, subsample
+
+
+def _extract_first_numeric_mean(ds) -> float:
+    """
+    Extract a scalar summary from an xarray.Dataset by taking the mean
+    of the first numeric variable.
+    """
+    numeric_vars = [
+        v for v in ds.data_vars
+        if np.issubdtype(ds[v].dtype, np.number)
+    ]
+    if not numeric_vars:
+        raise RuntimeError(
+            "Dataset returned no numeric data_vars. "
+            f"Found: {[(k, str(ds[k].dtype), ds[k].shape) for k in ds.data_vars]}"
+        )
+    vals = np.asarray(ds[numeric_vars[0]].values, dtype=float).reshape(-1)
+    return float(np.nanmean(vals))
+
+
 def mec_all_methods_for_datasets(
-        dataset: str,
-        fold_models_for_dataset: Dict[str, Any],
-        *,
-        methods: Optional[Iterable[str]] = None,
-        n_bins: int = 20,
-        subsample: float = 1.0,
-        n_bootstrap: int = 1,
-        mec_max_segments: int = 10,
-        mec_approx_error: float = 0.05,
-        nf_M: int = 200,
-        progress: bool = True,
-        n_jobs: int = 1,
+    dataset: str,
+    fold_models_for_dataset: Dict[str, Any],
+    *,
+    methods: Optional[Iterable[str]] = None,
+    n_bins: int = 20,
+    subsample: float = 1.0,
+    n_bootstrap: int = 1,
+    mec_max_segments: int = 10,
+    mec_approx_error: float = 0.05,
+    nf_M: int = 200,
+    progress: bool = True,
+    n_jobs: int = 1,
+    min_unique_for_ale: int = 3,
+    min_non_missing_for_ale: int = 10,
+    max_features_for_ale: Optional[int] = None,
+    force_recompute: bool = False,
 ) -> Dict[str, Any]:
     """
-    Computes:
-      - 1D ALE for all features
-      - IAS (overall interaction strength) via explainer.interaction_strength(ale=ale_1d, ...)
-      - MEC via explainer.main_effect_complexity(ale_1d, ...)
-      - NF (Number of Features Used) via your Algorithm-1 style perturbation
+    Computes, per method and fold:
+      - ALE on an ALE-safe subset of features
+      - IAS from that ALE dataset
+      - MEC from that ALE dataset
+      - NF on X_test
 
-    Notes:
-      - Uses your existing caching pattern with base_dir (must exist as a Path in this module).
-      - Requires the helper patches:
-          _patch_numpy_percentile_interpolation()
-          _patch_skexplain_run_parallel()
-      - Requires helper:
-          _number_of_features_used(...)
+    Important design choice:
+      We DO NOT reinsert dropped features into the ALE dataset.
+      IAS and MEC are computed only on ALE-valid features.
+      This avoids xarray/skexplain inconsistencies such as missing
+      __bin_values variables and invalid fabricated ALE curves.
     """
-
     out_path = base_dir / dataset / f"{dataset}_mec_all_methods.joblib"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if out_path.exists():
+    if out_path.exists() and not force_recompute:
         return load_model(out_path)
 
     if methods is None:
         methods = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
 
-    # Apply patches once up-front (safe to call repeatedly)
     _patch_numpy_percentile_interpolation()
     _patch_skexplain_run_parallel()
 
@@ -1751,13 +1847,16 @@ def mec_all_methods_for_datasets(
         "dataset_name": dataset,
         "by_method": {},
         "config": {
-            "n_bins": n_bins,
-            "subsample": subsample,
+            "n_bins_requested": n_bins,
+            "subsample_requested": subsample,
             "n_bootstrap": n_bootstrap,
             "mec_max_segments": mec_max_segments,
             "mec_approx_error": mec_approx_error,
             "nf_M": nf_M,
             "n_jobs": n_jobs,
+            "min_unique_for_ale": min_unique_for_ale,
+            "min_non_missing_for_ale": min_non_missing_for_ale,
+            "max_features_for_ale": max_features_for_ale,
         },
     }
 
@@ -1772,7 +1871,10 @@ def mec_all_methods_for_datasets(
         if not folds:
             continue
 
-        method_results: Dict[str, Any] = {"folds": []}
+        method_results: Dict[str, Any] = {
+            "folds": [],
+            "summary": {},
+        }
 
         for fold_data in folds:
             fold_id = fold_data["fold"]
@@ -1786,116 +1888,124 @@ def mec_all_methods_for_datasets(
                 [f"f{i}" for i in range(X_train.shape[1])]
             )
 
-            X_train_ale, feature_names_ale, kept_idx = _safe_ale_feature_subset(
-                X_train,
-                feature_names,
-                min_unique=2,
-            )
-
-            estimator_name = f"{mth}_fold{fold_id}"
-
-            explainer = skexplain.ExplainToolkit(
-                estimators=(estimator_name, model),  # your skexplain version needs a tuple
-                X=X_train,
-                y=y_train,
-                feature_names=feature_names,         # required when X is numpy
-            )
-
-            # -----------------------------
-            #  1D ALE (all features)
-            # -----------------------------
-            ale_1d = explainer.ale(
-                features=feature_names_ale,
-                n_bins=n_bins,
-                subsample=subsample,
-                n_bootstrap=n_bootstrap,
-                n_jobs=n_jobs,
-            )
-
-            # -----------------------------
-            #  IAS (overall) per tutorial:
-            #     ias = explainer.interaction_strength(ale=ale_1d, ...)
-            # -----------------------------
-            ias_ds = explainer.interaction_strength(
-                ale=ale_1d,
-                subsample=subsample,
-                n_bootstrap=n_bootstrap,
-            )
-
-            # robust scalar extraction from xarray.Dataset
-            ias_numeric_vars = [
-                v for v in ias_ds.data_vars
-                if np.issubdtype(ias_ds[v].dtype, np.number)
-            ]
-            if not ias_numeric_vars:
-                raise RuntimeError(
-                    f"interaction_strength returned no numeric data_vars. Got: "
-                    f"{[(k, str(ias_ds[k].dtype), ias_ds[k].shape) for k in ias_ds.data_vars]}"
-                )
-            _ias_vals = np.asarray(ias_ds[ias_numeric_vars[0]].values, dtype=float).reshape(-1)
-            ias_overall = float(np.mean(_ias_vals))  # mean across bootstraps if present
-
-            # -----------------------------
-            #  MEC per docs:
-            #     mec = explainer.main_effect_complexity(ale_1d, ...)
-            # -----------------------------
-            try:
-                mec_dict = explainer.main_effect_complexity(
-                    ale_1d,
-                    estimator_names=estimator_name,
-                    max_segments=mec_max_segments,
-                    approx_error=mec_approx_error,
-                )
-                mec_value = float(mec_dict[estimator_name])
-
-            except ZeroDivisionError as e:
-                if "Weights sum to zero" not in str(e):
-                    raise
-                print(
-                    f"[WARN] MEC weights sum to zero for dataset={dataset}, "
-                    f"method={mth}, fold={fold_id}. Using mec=0.0."
-                )
-                mec_value = 0.0
-
-            # -----------------------------
-            #  NF (your Algorithm 1)
-            # -----------------------------
-            nf_result = _number_of_features_used(
-                model,
-                X_test,
-                M=nf_M,
-            )
-
-            method_results["folds"].append({
+            fold_result: Dict[str, Any] = {
                 "fold": fold_id,
-                "feature_names": list(feature_names),
-                "ale_1d": ale_1d,          # xarray Dataset (can be large)
-                "ias_overall": ias_overall,
-                "ias_ds": ias_ds,          # optional, but useful for debugging
-                "mec": mec_value,
-                "nf": nf_result,
-                "ale_feature_names": feature_names_ale,
-                "ale_kept_idx": kept_idx.tolist(),
-                "ale_n_features_used": int(len(feature_names_ale)),
-                "ale_n_features_dropped": int(X_train.shape[1] - len(feature_names_ale)),
-            })
+                "method": mth,
+                "n_features_total": int(X_train.shape[1]),
+                "status": "ok",
+                "warnings": [],
+            }
 
-        # -----------------------------
-        #  Aggregate across folds
-        # -----------------------------
-        mec_vals = [f["mec"] for f in method_results["folds"]]
-        nf_vals = [f["nf"]["NF"] for f in method_results["folds"]]
-        ias_vals = [f["ias_overall"] for f in method_results["folds"]]
+            try:
+                X_train_ale, feature_names_ale, kept_idx = _safe_ale_feature_subset(
+                    X_train,
+                    list(feature_names),
+                    min_unique=min_unique_for_ale,
+                    min_non_missing=min_non_missing_for_ale,
+                    max_features=max_features_for_ale,
+                )
 
-        method_results["aggregate"] = {
-            "ias_mean": float(np.mean(ias_vals)) if ias_vals else None,
-            "ias_std": float(np.std(ias_vals)) if ias_vals else None,
-            "mec_mean": float(np.mean(mec_vals)) if mec_vals else None,
-            "mec_std": float(np.std(mec_vals)) if mec_vals else None,
-            "nf_mean": float(np.mean(nf_vals)) if nf_vals else None,
-            "nf_std": float(np.std(nf_vals)) if nf_vals else None,
-            "n_folds": int(len(method_results["folds"])),
-        }
+                fold_result["n_features_ale"] = int(len(feature_names_ale))
+                fold_result["feature_names_ale"] = list(feature_names_ale)
+                fold_result["kept_idx"] = kept_idx.tolist()
+
+                used_n_bins, used_subsample = _choose_arcene_safe_ale_params(
+                    X_train_ale,
+                    requested_n_bins=n_bins,
+                    requested_subsample=subsample,
+                )
+
+                fold_result["ale_params_used"] = {
+                    "n_bins": int(used_n_bins),
+                    "subsample": float(used_subsample) if isinstance(used_subsample, float) else int(used_subsample),
+                    "n_bootstrap": int(n_bootstrap),
+                }
+
+                estimator_name = f"{mth}_fold{fold_id}"
+
+                explainer = skexplain.ExplainToolkit(
+                    estimators=(estimator_name, model),
+                    X=X_train,
+                    y=y_train,
+                    feature_names=list(feature_names),
+                )
+
+                # ALE only on safe subset
+                ale_1d = explainer.ale(
+                    features=feature_names_ale,
+                    n_bins=used_n_bins,
+                    subsample=used_subsample,
+                    n_bootstrap=n_bootstrap,
+                    n_jobs=n_jobs,
+                )
+
+                fold_result["ale_1d"] = ale_1d
+
+                # IAS only on ALE-valid features
+                ias_ds = explainer.interaction_strength(
+                    ale=ale_1d,
+                    subsample=used_subsample,
+                    n_bootstrap=n_bootstrap,
+                )
+                ias_overall = _extract_first_numeric_mean(ias_ds)
+
+                # MEC only on ALE-valid features
+                try:
+                    mec_dict = explainer.main_effect_complexity(
+                        ale_1d,
+                        estimator_names=estimator_name,
+                        max_segments=mec_max_segments,
+                        approx_error=mec_approx_error,
+                    )
+                    mec_value = float(mec_dict[estimator_name])
+
+                except ZeroDivisionError as e:
+                    if "Weights sum to zero" not in str(e):
+                        raise
+                    fold_result["warnings"].append(
+                        "MEC weights sum to zero; using mec=0.0"
+                    )
+                    mec_value = 0.0
+
+                nf_result = _number_of_features_used(
+                    model,
+                    X_test,
+                    M=nf_M,
+                )
+
+                fold_result["IAS"] = float(ias_overall)
+                fold_result["MEC"] = float(mec_value)
+                fold_result["NF"] = int(nf_result["NF"])
+                fold_result["used_mask"] = nf_result["used_mask"].tolist()
+
+            except Exception as e:
+                fold_result["status"] = "error"
+                fold_result["error_type"] = type(e).__name__
+                fold_result["error_message"] = str(e)
+
+            method_results["folds"].append(fold_result)
+
+        ok_folds = [f for f in method_results["folds"] if f.get("status") == "ok"]
+
+        if ok_folds:
+            method_results["summary"] = {
+                "n_folds_total": len(method_results["folds"]),
+                "n_folds_ok": len(ok_folds),
+                "n_folds_error": len(method_results["folds"]) - len(ok_folds),
+                "IAS_mean": float(np.mean([f["IAS"] for f in ok_folds])),
+                "IAS_std": float(np.std([f["IAS"] for f in ok_folds], ddof=0)),
+                "MEC_mean": float(np.mean([f["MEC"] for f in ok_folds])),
+                "MEC_std": float(np.std([f["MEC"] for f in ok_folds], ddof=0)),
+                "NF_mean": float(np.mean([f["NF"] for f in ok_folds])),
+                "NF_std": float(np.std([f["NF"] for f in ok_folds], ddof=0)),
+                "n_features_ale_mean": float(np.mean([f["n_features_ale"] for f in ok_folds])),
+            }
+        else:
+            method_results["summary"] = {
+                "n_folds_total": len(method_results["folds"]),
+                "n_folds_ok": 0,
+                "n_folds_error": len(method_results["folds"]),
+            }
 
         results["by_method"][mth] = method_results
 

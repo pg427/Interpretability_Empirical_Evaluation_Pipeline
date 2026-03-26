@@ -50,9 +50,9 @@ def train_cli(args):
         X, y, feature_names = load_dataset(ds)
 
         # --- MEASURE 1: RIA ----
-        ria_results = ria_measure((X, y, feature_names), ds)
-        ria_json_path = (base_dir / ds) / f"{ds}_ria.json"
-        save_json(ria_json_path, ria_results)
+        # ria_results = ria_measure((X, y, feature_names), ds)
+        # ria_json_path = (base_dir / ds) / f"{ds}_ria.json"
+        # save_json(ria_json_path, ria_results)
 
         folds_stand = stratified_5fold_standardize(X, y)
         folds_unstand = stratified_5fold_standardize(X, y, standardize=False)
@@ -98,81 +98,81 @@ def train_cli(args):
             save_json(file_path_json, fold_models[ds][model_name])
 
         # --- MEASURE 2: SOC ----
-        soc_results = soc_all_methods_for_dataset(
-            dataset_name=ds,
-            method_fold_results=fold_models[ds],  # method -> folds
-            distance_type="euclidean",
-            force_recompute=args.overwrite,  # optional
-        )
-        soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
-        save_json(soc_json_path, soc_results)
+        # soc_results = soc_all_methods_for_dataset(
+        #     dataset_name=ds,
+        #     method_fold_results=fold_models[ds],  # method -> folds
+        #     distance_type="euclidean",
+        #     force_recompute=args.overwrite,  # optional
+        # )
+        # soc_json_path = (base_dir / ds) / f"{ds}_soc_all_methods.json"
+        # save_json(soc_json_path, soc_results)
 
         # --- MEASURE 3: Feature Synergy ----
-        fs_all = feature_synergy_all_methods_for_dataset(
-            ds,
-            fold_models[ds],
-            pop_size= 60,
-            n_generations=30,
-            n_runs=3,
-            parent_count=30,
-            include_accuracy_factor=False,
-        )
-        fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
-        save_json(fs_json_path, fs_all)
+        # fs_all = feature_synergy_all_methods_for_dataset(
+        #     ds,
+        #     fold_models[ds],
+        #     pop_size= 60,
+        #     n_generations=30,
+        #     n_runs=3,
+        #     parent_count=30,
+        #     include_accuracy_factor=False,
+        # )
+        # fs_json_path = (base_dir / ds) / f"{ds}_fs_all_methods.json"
+        # save_json(fs_json_path, fs_all)
 
         # # --- MEASURE 4: Robustness ----
-        rs_all = robustness_all_methods_for_dataset(
-            ds,
-            fold_models[ds],
-            k_bins=1,
-            N=20,
-            G=10,
-            max_instances_per_subpop=5,
-        )
-        rs_json_path = (base_dir / ds) / f"{ds}_rs_all_methods.json"
-        save_json(rs_json_path, rs_all)
+        # rs_all = robustness_all_methods_for_dataset(
+        #     ds,
+        #     fold_models[ds],
+        #     k_bins=1,
+        #     N=20,
+        #     G=10,
+        #     max_instances_per_subpop=5,
+        # )
+        # rs_json_path = (base_dir / ds) / f"{ds}_rs_all_methods.json"
+        # save_json(rs_json_path, rs_all)
 
         # # --- MEASURE 5: No. of features, Interaction Strength, Main Effect Complexity ----
         mec_all = mec_all_methods_for_datasets(
             ds,
-            fold_models[ds],
+            fold_models[ds]
         )
         mec_json_path = (base_dir / ds) / f"{ds}_mec_all_methods.json"
         save_json(mec_json_path, mec_all)
 
         # # --- ALL SURROGATE MEASURES ----
-        surrogate_measures = {}
-        for model_name in models:
-            surrogate_measures[model_name] = neighborhood_fidelity_comprehensibility_stability_measures(ds, model_name, fold_models[ds][model_name])
-        surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
-        save_json(surrogate_json_path, surrogate_measures)
+        # surrogate_measures = {}
+        # for model_name in models:
+        #     surrogate_measures[model_name] = neighborhood_fidelity_comprehensibility_stability_measures(ds, model_name, fold_models[ds][model_name])
+        # surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
+        # save_json(surrogate_json_path, surrogate_measures)
 
         # # --- ALL SHAP MEASURES ----
-        shap_explanations = {}
-        for model_name in models:
-            shap_explanations_measures = {}
-            if model_name == "dt":
-                shap_explanations[model_name] = CART_DT_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "xgb":
-                shap_explanations[model_name] = XGB_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "cbr":
-                shap_explanations[model_name] = CBR_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "proto":
-                shap_explanations[model_name] = PROTOPNET_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "mlp":
-                shap_explanations[model_name] = MLP_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "dnn":
-                shap_explanations[model_name] = DNN_8HL_5fold_shap(ds, fold_models[ds][model_name])
-
-            shap_explanations_measures['similarity'] = similarity_measure(ds, model_name, shap_explanations[model_name])
-            shap_explanations_measures['stability'] = stability_measure(ds, model_name, shap_explanations[model_name])
-            shap_explanations_measures['parsimony'] = parsimony_measure(ds, model_name, shap_explanations[model_name])
-            shap_explanations_measures['faithfulness'] = faithfulness_measure(ds, model_name, shap_explanations[model_name])
-
-            shap_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_explanations.json"
-            save_json(shap_json_path, shap_explanations[model_name])
-            shap_measures_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_measures.json"
-            save_json(shap_measures_json_path, shap_explanations_measures)
+        # shap_explanations = {}
+        # for model_name in models:
+        #     shap_explanations_measures = {}
+        #     if model_name == "dt":
+        #         shap_explanations[model_name] = CART_DT_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "xgb":
+        #         shap_explanations[model_name] = XGB_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "cbr":
+        #         shap_explanations[model_name] = CBR_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "proto":
+        #         shap_explanations[model_name] = PROTOPNET_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "mlp":
+        #         shap_explanations[model_name] = MLP_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "dnn":
+        #         shap_explanations[model_name] = DNN_8HL_5fold_shap(ds, fold_models[ds][model_name])
+        #
+        #     shap_explanations_measures['similarity'] = similarity_measure(ds, model_name, shap_explanations[model_name])
+        #     shap_explanations_measures['stability'] = stability_measure(ds, model_name, shap_explanations[model_name])
+        #     shap_explanations_measures['parsimony'] = parsimony_measure(ds, model_name, shap_explanations[model_name])
+        #     shap_explanations_measures['faithfulness'] = faithfulness_measure(ds, model_name, shap_explanations[model_name])
+        #
+        #     shap_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_explanations.json"
+        #     save_json(shap_json_path, shap_explanations[model_name])
+        #     shap_measures_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_measures.json"
+        #     save_json(shap_measures_json_path, shap_explanations_measures)
 
 if __name__ == "__main__":
     args = parse_args()
