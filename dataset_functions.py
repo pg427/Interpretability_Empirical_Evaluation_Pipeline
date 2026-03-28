@@ -67,6 +67,132 @@ def load_dataset(name: str,
         y = y.astype(int)
         feature_names = [str(c) for c in X_df.columns]
 
+    elif name == "spectrometer":
+        # UCI Low Resolution Spectrometer (ID = 93)
+        # ucimlrepo currently does not import this dataset reliably,
+        # so load it manually from the downloadable archive.
+        url = "https://archive.ics.uci.edu/static/public/93/low%2Bresolution%2Bspectrometer.zip"
+
+        with urllib.request.urlopen(url) as response:
+            zip_bytes = response.read()
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            with zf.open("lrs.data") as f:
+                text = f.read().decode("utf-8", errors="replace")
+
+        tokens = text.split()
+
+        raw_cols = 104
+        expected_cols = 103  # 1 name + 1 class + 8 metadata + 93 spectral features
+
+        if len(tokens) % raw_cols != 0:
+            raise ValueError(
+                f"Spectrometer token count {len(tokens)} is not divisible by {raw_cols}. "
+                f"Remainder: {len(tokens) % raw_cols}"
+            )
+
+        n_rows = len(tokens) // raw_cols
+        raw_rows = [tokens[i * raw_cols:(i + 1) * raw_cols] for i in range(n_rows)]
+
+        # Drop the leading "(" token from each row
+        rows = []
+        for i, row in enumerate(raw_rows, start=1):
+            if row[0] != "(":
+                raise ValueError(f"Spectrometer row {i} does not start with '(' as expected. Got: {row[0]}")
+            row = row[1:]
+
+            if len(row) != expected_cols:
+                raise ValueError(
+                    f"Spectrometer row {i} has {len(row)} fields after dropping '(', "
+                    f"expected {expected_cols}"
+                )
+
+            row[-1] = row[-1].rstrip(")")
+
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+
+        # According to UCI variable info:
+        # col 0   = LRS-name
+        # col 1   = LRS-class (target)
+        # col 2   = ID-type
+        # col 3   = Right-Ascension
+        # col 4   = Declination
+        # col 5   = Scale Factor
+        # col 6-9 = rescaling coefficients
+        # col 10-102 = 93 spectral intensity features
+
+        # Original target codes from UCI
+        y_raw = df.iloc[:, 1].astype(int).to_numpy()
+
+        # Spectral features only
+        X_df = df.iloc[:, 10:103].copy()
+        X = X_df.to_numpy(dtype=np.float32)
+
+        # Remove rare classes so 5-fold stratification works with the existing pipeline.
+        # With n_splits=5 in stratified_5fold_standardize(), every retained class must have at least 5 samples.
+        classes, counts = np.unique(y_raw, return_counts=True)
+        keep_classes = classes[counts >= 5]
+
+        mask = np.isin(y_raw, keep_classes)
+        X = X[mask]
+        y_raw = y_raw[mask]
+
+        # Remap retained classes to contiguous labels 0..K-1 for XGBoost
+        unique_classes = np.sort(np.unique(y_raw))
+        class_to_idx = {cls: idx for idx, cls in enumerate(unique_classes)}
+        y = np.array([class_to_idx[v] for v in y_raw], dtype=int)
+
+        feature_names = [f"spectral_{i}" for i in range(X.shape[1])]
+
+        print("spectrometer classes kept:", len(unique_classes))
+        print("spectrometer filtered shape:", X.shape, y.shape)
+
+    elif name == "darwin":
+        # UCI DARWIN (ID = 732)
+        dataset = fetch_ucirepo(id=732)
+
+        X_df = dataset.data.features.copy()
+        y_series = dataset.data.targets.iloc[:, 0].copy()
+
+        # Drop identifier-like columns
+        id_like_cols = [c for c in X_df.columns if str(c).lower().startswith("id")]
+        if id_like_cols:
+            X_df = X_df.drop(columns=id_like_cols)
+
+        # Keep only numeric features
+        X_df = X_df.apply(pd.to_numeric, errors="coerce")
+        X_df = X_df.dropna(axis=1, how="all")
+
+        if X_df.isnull().any().any():
+            bad_cols = X_df.columns[X_df.isnull().any()].tolist()
+            raise ValueError(f"DARWIN has non-numeric values in columns: {bad_cols}")
+
+        # Convert labels H/P -> 0/1
+        y_series = y_series.astype(str).str.strip()
+        label_map = {"H": 0, "P": 1}
+        if not set(y_series.unique()).issubset(label_map):
+            raise ValueError(f"Unexpected DARWIN labels: {sorted(y_series.unique())}")
+
+        y = y_series.map(label_map).astype(int).to_numpy()
+
+        X = X_df.to_numpy(dtype=np.float32)
+        feature_names = [str(c) for c in X_df.columns]
+
+    elif name == "sepsis":
+        # UCI Sepsis Survival (ID = 827)
+        dataset = fetch_ucirepo(id=827)
+
+        X_df = dataset.data.features.copy()
+        y_series = dataset.data.targets.iloc[:, 0].copy()
+
+        # Ensure binary 0/1 labels
+        y = y_series.astype(int).to_numpy()
+
+        X = X_df.to_numpy(dtype=np.float32)
+        feature_names = [str(c) for c in X_df.columns]
+
     elif name == "arcene":
         # OpenML ARCENE
         ds = fetch_openml(name="arcene", version=1, as_frame=True)
