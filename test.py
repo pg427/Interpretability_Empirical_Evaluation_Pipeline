@@ -143,38 +143,38 @@ def train_cli(args):
         save_json(mec_json_path, mec_all)
 
         # # --- ALL SURROGATE MEASURES ----
-        surrogate_measures = {}
-        for model_name in models:
-            surrogate_measures[model_name] = neighborhood_fidelity_comprehensibility_stability_measures(ds, model_name, fold_models[ds][model_name])
-        surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
-        save_json(surrogate_json_path, surrogate_measures)
-
-        # # --- ALL SHAP MEASURES ----
-        shap_explanations = {}
-        for model_name in models:
-            shap_explanations_measures = {}
-            if model_name == "dt":
-                shap_explanations[model_name] = CART_DT_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "xgb":
-                shap_explanations[model_name] = XGB_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "cbr":
-                shap_explanations[model_name] = CBR_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "proto":
-                shap_explanations[model_name] = PROTOPNET_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "mlp":
-                shap_explanations[model_name] = MLP_5fold_shap(ds, fold_models[ds][model_name])
-            elif model_name == "dnn":
-                shap_explanations[model_name] = DNN_8HL_5fold_shap(ds, fold_models[ds][model_name])
-
-            shap_explanations_measures['similarity'] = similarity_measure(ds, model_name, shap_explanations[model_name])
-            shap_explanations_measures['stability'] = stability_measure(ds, model_name, shap_explanations[model_name])
-            shap_explanations_measures['parsimony'] = parsimony_measure(ds, model_name, shap_explanations[model_name])
-            shap_explanations_measures['faithfulness'] = faithfulness_measure(ds, model_name, shap_explanations[model_name])
-
-            shap_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_explanations.json"
-            save_json(shap_json_path, shap_explanations[model_name])
-            shap_measures_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_measures.json"
-            save_json(shap_measures_json_path, shap_explanations_measures)
+        # surrogate_measures = {}
+        # for model_name in models:
+        #     surrogate_measures[model_name] = neighborhood_fidelity_comprehensibility_stability_measures(ds, model_name, fold_models[ds][model_name])
+        # surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
+        # save_json(surrogate_json_path, surrogate_measures)
+        #
+        # # # --- ALL SHAP MEASURES ----
+        # shap_explanations = {}
+        # for model_name in models:
+        #     shap_explanations_measures = {}
+        #     if model_name == "dt":
+        #         shap_explanations[model_name] = CART_DT_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "xgb":
+        #         shap_explanations[model_name] = XGB_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "cbr":
+        #         shap_explanations[model_name] = CBR_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "proto":
+        #         shap_explanations[model_name] = PROTOPNET_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "mlp":
+        #         shap_explanations[model_name] = MLP_5fold_shap(ds, fold_models[ds][model_name])
+        #     elif model_name == "dnn":
+        #         shap_explanations[model_name] = DNN_8HL_5fold_shap(ds, fold_models[ds][model_name])
+        #
+        #     shap_explanations_measures['similarity'] = similarity_measure(ds, model_name, shap_explanations[model_name])
+        #     shap_explanations_measures['stability'] = stability_measure(ds, model_name, shap_explanations[model_name])
+        #     shap_explanations_measures['parsimony'] = parsimony_measure(ds, model_name, shap_explanations[model_name])
+        #     shap_explanations_measures['faithfulness'] = faithfulness_measure(ds, model_name, shap_explanations[model_name])
+        #
+        #     shap_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_explanations.json"
+        #     save_json(shap_json_path, shap_explanations[model_name])
+        #     shap_measures_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_measures.json"
+        #     save_json(shap_measures_json_path, shap_explanations_measures)
 
 if __name__ == "__main__":
     args = parse_args()
