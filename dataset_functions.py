@@ -229,6 +229,31 @@ def load_dataset(name: str,
 
         feature_names = [str(c) for c in X_df.columns]
 
+    elif name == "yeast":
+        dataset = fetch_ucirepo(id=110)
+        X_df = dataset.data.features.copy()
+        y_series = dataset.data.targets.iloc[:, 0].copy()
+
+        # Convert features to numeric
+        X_df = X_df.apply(pd.to_numeric, errors="coerce")
+
+        # Drop non-numeric columns if any (safety)
+        X_df = X_df.dropna(axis=1, how="all")
+
+        # Check for remaining NaNs
+        if X_df.isnull().any().any():
+            bad_cols = X_df.columns[X_df.isnull().any()].tolist()
+            raise ValueError(f"Yeast dataset has NaNs in columns: {bad_cols}")
+
+        # Convert labels (strings like 'CYT', 'NUC', etc.) → integers
+        y_series = y_series.astype(str).str.strip()
+        unique_classes = sorted(y_series.unique())
+        class_to_idx = {cls: idx for idx, cls in enumerate(unique_classes)}
+        y = np.array([class_to_idx[v] for v in y_series], dtype=int)
+
+        X = X_df.to_numpy(dtype=np.float32)
+        feature_names = [str(c) for c in X_df.columns]
+
     elif name == "higgs":
         # UCI HIGGS
         dataset = fetch_ucirepo(id=280)

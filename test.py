@@ -8,12 +8,12 @@ import argparse
 import numpy as np
 from direct_measures_functions import ria_measure, soc_all_methods_for_dataset, feature_synergy_all_methods_for_dataset, robustness_all_methods_for_dataset, mec_all_methods_for_datasets
 
-ALL_DATASETS = ["iris", "wine", "breast_cancer", "german_credit", "spectrometer", "darwin", "sepsis"]
+ALL_DATASETS = ["iris", "wine", "breast_cancer", "german_credit", "spectrometer", "darwin", "sepsis", "yeast"]
 ALL_MODELS = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train AI methods on selected Datasets")
-    parser.add_argument( "--datasets", nargs="+", choices=["iris", "wine", "breast_cancer", "german_credit", "spectrometer", "darwin", "sepsis", "all"], # "arcene", "higgs", "isolet"
+    parser.add_argument( "--datasets", nargs="+", choices=["iris", "wine", "breast_cancer", "german_credit", "spectrometer", "darwin", "sepsis", "yeast","all"], # "arcene", "higgs", "isolet"
                          default=["iris"],
                          help="Datasets to train on"
                          )
