@@ -127,8 +127,7 @@ def train_cli(args):
             fold_models[ds],
             k_bins=1,
             N=20,
-            G=10,
-            max_instances_per_subpop=5,
+            G=10
         )
         rs_json_path = (base_dir / ds) / f"{ds}_rs_all_methods.json"
         save_json(rs_json_path, rs_all)
