@@ -142,11 +142,11 @@ def train_cli(args):
         save_json(mec_json_path, mec_all)
 
         # # --- ALL SURROGATE MEASURES ----
-        # surrogate_measures = {}
-        # for model_name in models:
-        #     surrogate_measures[model_name] = neighborhood_fidelity_comprehensibility_stability_measures(ds, model_name, fold_models[ds][model_name])
-        # surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
-        # save_json(surrogate_json_path, surrogate_measures)
+        surrogate_measures = {}
+        for model_name in models:
+            surrogate_measures[model_name] = neighborhood_fidelity_comprehensibility_stability_measures(ds, model_name, fold_models[ds][model_name])
+        surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
+        save_json(surrogate_json_path, surrogate_measures)
         #
         # # # --- ALL SHAP MEASURES ----
         # shap_explanations = {}

@@ -692,10 +692,27 @@ def neighborhood_fidelity_comprehensibility_stability_measures(dataset,
             else:
                 test_idx = fold["test_idx"]
 
-            y_pred = model.predict(X_test)
-            class_indices = np.array([
-                np.where(model.classes_ == y)[0][0] for y in y_pred
-            ])
+            y_pred = np.asarray(model.predict(X_test))
+
+            if hasattr(model, "classes_"):
+                model_classes = np.asarray(model.classes_)
+                class_to_index = {cls: idx for idx, cls in enumerate(model_classes)}
+                class_indices = np.array([class_to_index[y] for y in y_pred], dtype=int)
+
+            elif hasattr(model, "n_classes"):
+                # ProtoPNet / PyTorch-style model:
+                # assume predicted labels are already integer class IDs in [0, n_classes-1]
+                class_indices = np.asarray(y_pred, dtype=int)
+
+                if np.any(class_indices < 0) or np.any(class_indices >= int(model.n_classes)):
+                    raise ValueError(
+                        f"Predicted labels {np.unique(class_indices)} are out of range "
+                        f"for model.n_classes={model.n_classes}"
+                    )
+            else:
+                raise AttributeError(
+                    f"Model of type {type(model).__name__} has neither 'classes_' nor 'n_classes'."
+                )
 
             point_nf_scores = []
             surrogate_coefficients = []
