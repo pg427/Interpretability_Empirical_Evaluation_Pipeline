@@ -8,6 +8,7 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from posthoc_functions import rebuild_explainer_from_fold
 from scipy.stats import spearmanr, pearsonr
 from sklearn.linear_model import LinearRegression
+from tqdm.auto import tqdm
 
 base_dir = Path.cwd()/"trained_models"
 
@@ -680,7 +681,12 @@ def neighborhood_fidelity_comprehensibility_stability_measures(dataset,
     if combined_path.exists():
         fold_model_results = load_model(combined_path)
     else:
-        for fold_idx, fold in enumerate(folds):
+        for fold_idx, fold in tqdm(
+                enumerate(folds),
+                total=len(folds),
+                desc=f"[{dataset}] {method}: folds",
+                leave=True
+        ):
             model = fold["model"]
             X_test = np.asarray(fold["X_test"])
             y_test = np.asarray(fold["y_test"])
@@ -720,7 +726,12 @@ def neighborhood_fidelity_comprehensibility_stability_measures(dataset,
             surrogate_nonzero_coefficients = []
             point_stability_scores = []
 
-            for i, x in enumerate(X_test):
+            for i, x in tqdm(
+                    enumerate(X_test),
+                    total=len(X_test),
+                    desc=f"[{dataset}] {method}: fold {fold['fold']} test points",
+                    leave=False
+            ):
                 c_idx = class_indices[i]
 
                 surrogate, X_nbhd, y_bb = _fit_local_linear_surrogate(
@@ -754,7 +765,12 @@ def neighborhood_fidelity_comprehensibility_stability_measures(dataset,
 
                 local_diffs = []
 
-                for j, x_prime in enumerate(X_prime):
+                for j, x_prime in tqdm(
+                        enumerate(X_prime),
+                        total=len(X_prime),
+                        desc=f"[{dataset}] {method}: fold {fold['fold']} point {i + 1}/{len(X_test)} perturbations",
+                        leave=False
+                ):
                     surrogate_prime, _, _ = _fit_local_linear_surrogate(
                         model,
                         x_prime,
