@@ -222,6 +222,18 @@ def separability_measure(dataset, method, folds, *, shap_dist:str="l2", tol: flo
         save_model(fold_model_shap_separability, separability_path)
     return fold_model_shap_separability
 
+def _prepare_measure_inputs(fold, *, mode=None):
+    X_train = np.asarray(fold["X_train"], dtype=np.float32)
+    X_test = np.asarray(fold["X_test"], dtype=np.float32)
+
+    if mode is None:
+        return X_train, X_test, None
+
+    else:
+        scaler = StandardScaler()
+    scaler.fit(X_train)
+    return scaler.transform(X_train), scaler.transform(X_test), scaler
+
 def similarity_measure(dataset, method, folds, *, shap_dist:str="l2", tot: float=1e-12, dbscan_eps: float = 0.1,
     dbscan_min_samples: int = 5,):
     '''
@@ -254,16 +266,11 @@ def similarity_measure(dataset, method, folds, *, shap_dist:str="l2", tot: float
         fold_model_shap_similarity = load_model(similarity_path)
     else:
         for fold_idx, fold in enumerate(folds):
-            X_test = fold['X_test']
-            sv_pred = fold['feature_attribution_pred_class']
             scaler = fold['scaler']
+            _, Xn, measure_scaler = _prepare_measure_inputs(fold, mode=scaler)
+            sv_pred = np.asarray(fold["feature_attribution_pred_class"])
 
             # STEP 1: Normalize test instances and DBSCAN Clustering
-            if scaler == None:
-                scaler = MinMaxScaler()
-                X_train = fold['X_train']
-                scaler.fit(X_train)
-            Xn = scaler.transform(X_test)
             db = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
             cluster_labels = db.fit_predict(Xn)
 
@@ -541,26 +548,26 @@ def faithfulness_measure(dataset, method, folds, *, corr_method: str = "spearman
             corr_vals = []
 
             for i in range(n_test):
-                w_i = w_test[i, :]
-                w_i = np.abs(w_i)
+                w_i = np.abs(np.asarray(w_test[i]).ravel())
+                delta_i = np.asarray(deltas[i]).ravel()
 
-                delta_i = deltas[i, :]
+                if np.allclose(w_i, w_i[0]) or np.allclose(delta_i, delta_i[0]):
+                    r = 0.0
+                else:
+                    if corr_method == "spearman":
+                        r, _ = spearmanr(w_i, delta_i)
+                    else:
+                        r, _ = pearsonr(w_i, delta_i)
 
-                w_i = np.asarray(w_i).ravel()
-                delta_i = np.asarray(delta_i).ravel()
+                    if np.isnan(r):
+                        r = 0.0
 
-                if corr_method == "spearman":
-                    r, _ = spearmanr(w_i, delta_i)
-                elif corr_method == "pearson":
-                    r, _ = pearsonr(w_i, delta_i)
                 corr_vals.append(r)
-
                 faithfulness_per_instance.append({
                     "test_instance_id": int(i),
                     "explained_class": int(c_idx[i]),
                     "p_class_original": float(p_c[i]),
                     "faithfulness_corr": float(r),
-                    # Optional debug payload (comment out if you want smaller artifacts):
                     "importance_vector": w_test[i, :].astype(float),
                     "effect_vector": delta_i.astype(float),
                 })

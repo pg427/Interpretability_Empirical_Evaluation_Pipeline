@@ -13,7 +13,7 @@ ALL_MODELS = ["dt", "xgb", "cbr", "proto", "mlp", "dnn"]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train AI methods on selected Datasets")
-    parser.add_argument( "--datasets", nargs="+", choices=["iris", "wine", "breast_cancer", "german_credit", "spectrometer", "darwin", "sepsis", "yeast","all"], # "arcene", "higgs", "isolet"
+    parser.add_argument( "--datasets", nargs="+", choices=["iris", "wine", "breast_cancer", "german_credit", "darwin", "sepsis", "yeast","all"], # "arcene", "higgs", "isolet"
                          default=["iris"],
                          help="Datasets to train on"
                          )
