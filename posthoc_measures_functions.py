@@ -229,13 +229,17 @@ def _prepare_measure_inputs(fold, *, mode=None):
     if mode is None:
         return X_train, X_test, None
 
-    else:
-        scaler = StandardScaler()
-    scaler.fit(X_train)
-    return scaler.transform(X_train), scaler.transform(X_test), scaler
+    scaler = mode
 
-def similarity_measure(dataset, method, folds, *, shap_dist:str="l2", tot: float=1e-12, dbscan_eps: float = 0.1,
-    dbscan_min_samples: int = 5,):
+    if hasattr(scaler, "n_features_in_"):
+        return scaler.transform(X_train), scaler.transform(X_test), scaler
+
+    if hasattr(scaler, "fit") and hasattr(scaler, "transform"):
+        scaler.fit(X_train)
+        return scaler.transform(X_train), scaler.transform(X_test), scaler
+
+
+def similarity_measure(dataset, method, folds, *, shap_dist:str="l2", tol: float=1e-12, dbscan_eps: float = 0.1, dbscan_min_samples: int = 5,):
     '''
         This function calculates similarity values given a dataset, method and a fold structure of the type below.
         :param folds: Dictionary of folds structured as:
@@ -271,7 +275,9 @@ def similarity_measure(dataset, method, folds, *, shap_dist:str="l2", tot: float
             sv_pred = np.asarray(fold["feature_attribution_pred_class"])
 
             # STEP 1: Normalize test instances and DBSCAN Clustering
-            db = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
+            eps = dbscan_eps
+            min_samples = dbscan_min_samples
+            db = DBSCAN(eps=eps, min_samples=min_samples)
             cluster_labels = db.fit_predict(Xn)
 
             # STEP 2: Mean Pairwise distances within each cluster
@@ -299,7 +305,25 @@ def similarity_measure(dataset, method, folds, *, shap_dist:str="l2", tot: float
                     "size": int(len(idx)),
                     "mean_pairwise_euclidean_dist": c_mean,
                 }
-            similarity_score = float(np.mean(cluster_means)) if len(cluster_means) else float("nan")
+
+            if len(cluster_means):
+                similarity_score = float(np.mean(cluster_means))
+            else:
+                global_dists = []
+                n = len(sv_pred)
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        d = dist_calc(sv_pred[i], sv_pred[j], shap_dist)
+                        if d <= tol:
+                            d = 0.0
+                        global_dists.append(d)
+
+                similarity_score = float(np.mean(global_dists)) if len(global_dists) else 0.0
+                clusters["fallback_global"] = {
+                    "indices": list(range(len(sv_pred))),
+                    "size": int(len(sv_pred)),
+                    "mean_pairwise_euclidean_dist": similarity_score,
+                }
 
             fold_model_shap_similarity.append({
                 "fold": fold["fold"],
