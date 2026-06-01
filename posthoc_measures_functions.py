@@ -917,3 +917,93 @@ def neighborhood_fidelity_comprehensibility_stability_measures(dataset,
         save_model(fold_model_results, combined_path)
 
     return fold_model_results
+
+from model_save_functions import save_json
+
+def shap_sim_stab_pars_faith_measures(
+    dataset,
+    method,
+    shap_folds,
+    *,
+    force_recompute=False,
+):
+    """
+    Computes similarity, stability, parsimony, and faithfulness together.
+
+    Saves one joblib per method:
+        trained_models/{dataset}/shap_{method}_fold_sim_stab_pars_faith.joblib
+    """
+
+    combined_path = (
+        base_dir
+        / dataset
+        / f"shap_{method}_fold_sim_stab_pars_faith.joblib"
+    )
+
+    if combined_path.exists() and not force_recompute:
+        return load_model(combined_path)
+
+    sim = similarity_measure(
+        dataset,
+        method,
+        shap_folds,
+        force_recompute=force_recompute,
+    )
+
+    stab = stability_measure(
+        dataset,
+        method,
+        shap_folds,
+    )
+
+    pars = parsimony_measure(
+        dataset,
+        method,
+        shap_folds,
+    )
+
+    faith = faithfulness_measure(
+        dataset,
+        method,
+        shap_folds,
+    )
+
+    combined_results = []
+
+    for fold_idx in range(len(shap_folds)):
+        base_fold = dict(shap_folds[fold_idx])
+
+        base_fold["similarity"] = {
+            "similarity_clusters": sim[fold_idx]["similarity_clusters"],
+            "similarity_total_test_avg": sim[fold_idx]["similarity_total_test_avg"],
+            "similarity_status": sim[fold_idx]["similarity_status"],
+            "dbscan_eps_used": sim[fold_idx]["dbscan_eps_used"],
+            "dbscan_eps_percentile": sim[fold_idx]["dbscan_eps_percentile"],
+            "dbscan_min_samples": sim[fold_idx]["dbscan_min_samples"],
+        }
+
+        base_fold["stability"] = {
+            "stability_clusters": stab[fold_idx]["stability_clusters"],
+            "stability_per_instance": stab[fold_idx]["stability_per_instance"],
+            "stability_total_test_avg": stab[fold_idx]["stability_total_test_avg"],
+        }
+
+        base_fold["parsimony"] = {
+            "parsimony_tol": pars[fold_idx]["parsimony_tol"],
+            "parsimony_shap_explanation_per_test_instance": pars[fold_idx]["parsimony_shap_explanation_per_test_instance"],
+            "avg_shap_parsimony_per_test_instance": pars[fold_idx]["avg_shap_parsimony_per_test_instance"],
+            "total_parsimony_averaged_test": pars[fold_idx]["total_parsimony_averaged_test"],
+        }
+
+        base_fold["faithfulness"] = {
+            "faithfulness_baseline_vector": faith[fold_idx]["faithfulness_baseline_vector"],
+            "faithfulness_effects": faith[fold_idx]["faithfulness_effects"],
+            "faithfulness_per_instance": faith[fold_idx]["faithfulness_per_instance"],
+            "faithfulness_total_test_avg": faith[fold_idx]["faithfulness_total_test_avg"],
+            "faithfulness_corr_method": faith[fold_idx]["faithfulness_corr_method"],
+        }
+
+        combined_results.append(base_fold)
+
+    save_model(combined_results, combined_path)
+    return combined_results

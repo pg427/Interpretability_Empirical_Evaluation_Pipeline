@@ -1,7 +1,10 @@
 from dataset_functions import load_dataset, stratified_5fold_standardize
 from method_functions import CART_DT_5FOLD, XGB_5FOLD, CBR_5FOLD, PROTOPNET_5FOLD, MLP_5FOLD, DNN_8HL_5fold
 from posthoc_functions import CART_DT_5fold_shap, XGB_5fold_shap, CBR_5fold_shap, PROTOPNET_5fold_shap, DNN_8HL_5fold_shap, MLP_5fold_shap
-from posthoc_measures_functions import  similarity_measure, stability_measure, neighborhood_fidelity_comprehensibility_stability_measures, parsimony_measure, faithfulness_measure
+from posthoc_measures_functions import (
+    neighborhood_fidelity_comprehensibility_stability_measures,
+    shap_sim_stab_pars_faith_measures,
+)
 from model_save_functions import save_model, load_model, save_json
 from pathlib import Path
 import argparse
@@ -159,10 +162,10 @@ def train_cli(args):
         # surrogate_json_path = (base_dir / ds) / f"{ds}_surrogate_all_measures.json"
         # save_json(surrogate_json_path, surrogate_measures)
         #
-        # # # --- ALL SHAP MEASURES ----
+        # --- ALL SHAP MEASURES ----
+        shap_measures = {}
         shap_explanations = {}
         for model_name in models:
-            shap_explanations_measures = {}
             if model_name == "dt":
                 shap_explanations[model_name] = CART_DT_5fold_shap(ds, fold_models[ds][model_name])
             elif model_name == "xgb":
@@ -176,15 +179,15 @@ def train_cli(args):
             elif model_name == "dnn":
                 shap_explanations[model_name] = DNN_8HL_5fold_shap(ds, fold_models[ds][model_name])
 
-            shap_explanations_measures['similarity'] = similarity_measure(ds, model_name, shap_explanations[model_name])
-            # shap_explanations_measures['stability'] = stability_measure(ds, model_name, shap_explanations[model_name])
-            # shap_explanations_measures['parsimony'] = parsimony_measure(ds, model_name, shap_explanations[model_name])
-            # shap_explanations_measures['faithfulness'] = faithfulness_measure(ds, model_name, shap_explanations[model_name])
-        #
-            # shap_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_explanations.json"
-            # save_json(shap_json_path, shap_explanations[model_name])
-            shap_measures_json_path = (base_dir / ds) / f"{ds}_{model_name}_shap_measures.json"
-            save_json(shap_measures_json_path, shap_explanations_measures)
+            shap_measures[model_name] = shap_sim_stab_pars_faith_measures(
+                ds,
+                model_name,
+                shap_explanations[model_name],
+                force_recompute=args.overwrite,
+            )
+
+        shap_json_path = (base_dir / ds) / f"{ds}_shap_all_measures.json"
+        save_json(shap_json_path, shap_measures)
 
     # --- STATISTICAL ANALYSIS: RIA H2.1 ----
     # ria_h2_1_results = spearman_features_vs_ria(
