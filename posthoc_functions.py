@@ -591,6 +591,7 @@ def shap_attributions(explainer, model, X, y_pred):
 def CART_DT_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
     """
     SHAP feature attributions for Decision Tree folds.
+    Uses probability-space TreeSHAP for consistency with KernelExplainer methods.
     """
     post_hoc_path = base_dir / dataset / "dt_fold_model_shap.joblib"
     DT_5fold_model_shap = []
@@ -600,12 +601,20 @@ def CART_DT_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
 
     for fold_idx, fold in enumerate(folds):
         dt_model = fold["model"]
+
+        X_train = np.asarray(fold["X_train"], dtype=np.float32)
         X_test = np.asarray(fold["X_test"], dtype=np.float32)
 
         if max_samples is not None and len(X_test) > max_samples:
             X_test = X_test[:max_samples]
 
-        explainer = shap.TreeExplainer(dt_model)
+        explainer = shap.TreeExplainer(
+            dt_model,
+            data=X_train,
+            model_output="probability",
+            feature_perturbation="interventional"
+        )
+
         sv = explainer.shap_values(X_test)
 
         y_pred = dt_model.predict(X_test)
@@ -624,7 +633,9 @@ def CART_DT_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
             "performance_metrics": fold.get("performance_metrics", None),
             "feature_attribution_all_classes": sv_all,
             "feature_attribution_pred_class": sv_pred,
-            "y_pred": y_pred
+            "y_pred": y_pred,
+            "shap_model_output": "probability",
+            "shap_feature_perturbation": "interventional"
         })
 
     save_model(DT_5fold_model_shap, post_hoc_path)
@@ -634,9 +645,20 @@ def CART_DT_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
 # =========================================================
 # XGB SHAP
 # =========================================================
-def XGB_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
+def XGB_5fold_shap(
+    dataset,
+    folds,
+    *,
+    random_state=42,
+    max_samples=None,
+    background_size=50,
+    nsamples="auto"
+):
     """
     SHAP feature attributions for XGB folds.
+
+    Uses KernelExplainer over predict_proba so XGB explanations are in
+    probability space and comparable with MLP/DNN/CBR/ProtoPNet.
     """
     post_hoc_path = base_dir / dataset / "xgb_fold_model_shap.joblib"
     XGB_5fold_model_shap = []
@@ -644,17 +666,29 @@ def XGB_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
     if post_hoc_path.exists():
         return load_model(post_hoc_path)
 
+    rng = np.random.RandomState(random_state)
+
     for fold_idx, fold in enumerate(folds):
         xgb_model = fold["model"]
+
+        X_train = np.asarray(fold["X_train"], dtype=np.float32)
         X_test = np.asarray(fold["X_test"], dtype=np.float32)
 
         if max_samples is not None and len(X_test) > max_samples:
             X_test = X_test[:max_samples]
 
-        explainer = shap.TreeExplainer(xgb_model)
-        sv = explainer.shap_values(X_test)
-
         y_pred = xgb_model.predict(X_test)
+
+        if len(X_train) > background_size:
+            bg_idx = rng.choice(len(X_train), size=background_size, replace=False)
+            background = X_train[bg_idx]
+        else:
+            background = X_train
+
+        f_proba = PredictProbaWrapper(xgb_model)
+        explainer = shap.KernelExplainer(f_proba, background)
+
+        sv = explainer.shap_values(X_test, nsamples=nsamples)
         sv_all, sv_pred = _normalize_shap_output(sv, y_pred, xgb_model.classes_)
 
         XGB_5fold_model_shap.append({
@@ -670,7 +704,12 @@ def XGB_5fold_shap(dataset, folds, *, random_state=42, max_samples=None):
             "performance_metrics": fold.get("performance_metrics", None),
             "feature_attribution_all_classes": sv_all,
             "feature_attribution_pred_class": sv_pred,
-            "y_pred": y_pred
+            "y_pred": y_pred,
+            "shap_model_output": "probability",
+            "shap_explainer": "KernelExplainer",
+            "shap_random_state": random_state,
+            "shap_background_size": background_size,
+            "shap_nsamples": nsamples
         })
 
     save_model(XGB_5fold_model_shap, post_hoc_path)
@@ -1050,71 +1089,78 @@ def PROTOPNET_5fold_shap(
 # =========================================================
 # Optional: rebuild explainer from fold
 # =========================================================
-def rebuild_explainer_from_fold(method: str, fold: dict):
-    model = fold["model"]
-
-    if method in ("dt", "xgb"):
-        return shap.TreeExplainer(model)
-
-    if method == "cbr":
-        rng = np.random.RandomState(fold.get("shap_random_state", 42))
-        background_size = int(fold.get("shap_background_size", 50))
-
-        cbr_model = model
-        X_train_raw = np.asarray(fold["X_train"], dtype=object)
-        cat_cols = sorted(list(getattr(cbr_model, "categorical_idx", [])))
-
-        if len(cat_cols) > 0:
-            X_train_enc, _, _ = cbr_model.encode_categoricals_for_xgb(
-                X_train_raw, X_train_raw[:1], cat_cols
-            )
-            X_train_enc = X_train_enc.astype(np.float32)
-        else:
-            X_train_enc = X_train_raw.astype(np.float32)
-
-        if len(X_train_enc) > background_size:
-            bg_idx = rng.choice(len(X_train_enc), size=background_size, replace=False)
-            background = X_train_enc[bg_idx]
-        else:
-            background = X_train_enc
-
-        old_X_train = cbr_model.X_train_
-        try:
-            cbr_model.X_train_ = X_train_enc
-            f_proba = CBRProbaWrapper(cbr_model, cat_cols, round_categoricals=True)
-            explainer = shap.KernelExplainer(f_proba, background)
-        finally:
-            cbr_model.X_train_ = old_X_train
-
-        return explainer
-
-    if method in ("mlp", "dnn"):
-        rng = np.random.RandomState(fold.get("shap_random_state", 42))
-        background_size = int(fold.get("shap_background_size", 50))
-
-        X_train = np.asarray(fold["X_train"], dtype=np.float32)
-        if len(X_train) > background_size:
-            bg_idx = rng.choice(len(X_train), size=background_size, replace=False)
-            background = X_train[bg_idx]
-        else:
-            background = X_train
-
-        f_proba = PredictProbaWrapper(model)
-        return shap.KernelExplainer(f_proba, background)
-
-    if method == "protopnet":
-        rng = np.random.RandomState(fold.get("shap_random_state", 42))
-        background_size = int(fold.get("shap_background_size", 50))
-        device = fold.get("shap_device", "cuda" if torch.cuda.is_available() else "cpu")
-
-        X_train = np.asarray(fold["X_train"], dtype=np.float32)
-        if len(X_train) > background_size:
-            bg_idx = rng.choice(len(X_train), size=background_size, replace=False)
-            background = X_train[bg_idx]
-        else:
-            background = X_train
-
-        f_proba = ProtoPNetProbaWrapper(model, device=device)
-        return shap.KernelExplainer(f_proba, background)
-
-    raise ValueError(f"Unknown method: {method}")
+# def rebuild_explainer_from_fold(method: str, fold: dict):
+#     model = fold["model"]
+#
+#     if method in ("dt", "xgb"):
+#         X_train = np.asarray(fold["X_train"], dtype=np.float32)
+#
+#         return shap.TreeExplainer(
+#             model,
+#             data=X_train,
+#             model_output="probability",
+#             feature_perturbation="interventional"
+#         )
+#
+#     if method == "cbr":
+#         rng = np.random.RandomState(fold.get("shap_random_state", 42))
+#         background_size = int(fold.get("shap_background_size", 50))
+#
+#         cbr_model = model
+#         X_train_raw = np.asarray(fold["X_train"], dtype=object)
+#         cat_cols = sorted(list(getattr(cbr_model, "categorical_idx", [])))
+#
+#         if len(cat_cols) > 0:
+#             X_train_enc, _, _ = cbr_model.encode_categoricals_for_xgb(
+#                 X_train_raw, X_train_raw[:1], cat_cols
+#             )
+#             X_train_enc = X_train_enc.astype(np.float32)
+#         else:
+#             X_train_enc = X_train_raw.astype(np.float32)
+#
+#         if len(X_train_enc) > background_size:
+#             bg_idx = rng.choice(len(X_train_enc), size=background_size, replace=False)
+#             background = X_train_enc[bg_idx]
+#         else:
+#             background = X_train_enc
+#
+#         old_X_train = cbr_model.X_train_
+#         try:
+#             cbr_model.X_train_ = X_train_enc
+#             f_proba = CBRProbaWrapper(cbr_model, cat_cols, round_categoricals=True)
+#             explainer = shap.KernelExplainer(f_proba, background)
+#         finally:
+#             cbr_model.X_train_ = old_X_train
+#
+#         return explainer
+#
+#     if method in ("mlp", "dnn"):
+#         rng = np.random.RandomState(fold.get("shap_random_state", 42))
+#         background_size = int(fold.get("shap_background_size", 50))
+#
+#         X_train = np.asarray(fold["X_train"], dtype=np.float32)
+#         if len(X_train) > background_size:
+#             bg_idx = rng.choice(len(X_train), size=background_size, replace=False)
+#             background = X_train[bg_idx]
+#         else:
+#             background = X_train
+#
+#         f_proba = PredictProbaWrapper(model)
+#         return shap.KernelExplainer(f_proba, background)
+#
+#     if method == "protopnet":
+#         rng = np.random.RandomState(fold.get("shap_random_state", 42))
+#         background_size = int(fold.get("shap_background_size", 50))
+#         device = fold.get("shap_device", "cuda" if torch.cuda.is_available() else "cpu")
+#
+#         X_train = np.asarray(fold["X_train"], dtype=np.float32)
+#         if len(X_train) > background_size:
+#             bg_idx = rng.choice(len(X_train), size=background_size, replace=False)
+#             background = X_train[bg_idx]
+#         else:
+#             background = X_train
+#
+#         f_proba = ProtoPNetProbaWrapper(model, device=device)
+#         return shap.KernelExplainer(f_proba, background)
+#
+#     raise ValueError(f"Unknown method: {method}")
