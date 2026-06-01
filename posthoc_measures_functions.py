@@ -588,7 +588,7 @@ def parsimony_measure(dataset, method, folds, *, tol: float=1e-12):
     return fold_model_shap_parsimony
 
 def faithfulness_measure(dataset, method, folds, *, corr_method: str = "spearman"):
-    faithfulness_path = base_dir / dataset / f"{method}_fold_model_faithfulness.joblib"
+    faithfulness_path = base_dir / dataset / f"{method}_fold_model_shap_faithfulness.joblib"
     fold_model_shap_faithfulness = []
 
     if faithfulness_path.exists():
